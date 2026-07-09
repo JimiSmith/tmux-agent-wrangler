@@ -189,6 +189,16 @@ def main(stdscr):
         windows, pane_to_window = fetch_windows()
         if not windows:
             return
+        # If the sidebar is the only pane left in its window, move on to the
+        # next window rather than sitting there full-width. Leaving makes
+        # tmux destroy the emptied window.
+        me = pane_to_window.get(SIDEBAR_PANE)
+        if me and not me["panes"]:
+            nxt = windows[(windows.index(me) + 1) % len(windows)]
+            if nxt is me:
+                return
+            focus(nxt["id"])
+            continue
         sessions = fetch_agent_sessions(pane_to_window)
         rows = build_rows(windows, sessions)
         items = [item for _, item in rows if isinstance(item, dict)]
