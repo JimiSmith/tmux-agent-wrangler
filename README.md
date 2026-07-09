@@ -40,7 +40,7 @@ it moves itself into whichever window becomes current.
 ### TPM
 
 ```tmux
-set -g @plugin 'james/tmux-agent-wrangler'
+set -g @plugin 'JimiSmith/tmux-agent-wrangler'
 ```
 
 ### Manual
