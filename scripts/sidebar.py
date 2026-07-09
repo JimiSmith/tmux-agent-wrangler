@@ -104,7 +104,10 @@ def build_rows(windows, sessions):
         for i, p in enumerate(w["panes"]):
             branch = "└─" if i == last else "├─"
             active = "*" if p["active"] else " "
-            rows.append((f"   {branch}{active}{p['index']}: {p['cmd']}", None))
+            rows.append(
+                (f"   {branch}{active}{p['index']}: {p['cmd']}",
+                 {"kind": "pane", "key": ("p", p["id"]), "win": w, "pane": p["id"]})
+            )
     for agent in sorted({s["agent"] for s in sessions}):
         rows.append(("", None))
         rows.append((f" {agent.upper()}", "header"))
@@ -167,9 +170,14 @@ def draw(stdscr, rows, selected_key, offset):
         if item == "header":
             attr = curses.A_BOLD | curses.A_UNDERLINE
         elif isinstance(item, dict):
-            attr = curses.A_BOLD if item["kind"] == "window" else curses.color_pair(2)
-            if item["kind"] == "window" and item["win"]["active"]:
-                attr |= curses.color_pair(1)
+            if item["kind"] == "window":
+                attr = curses.A_BOLD
+                if item["win"]["active"]:
+                    attr |= curses.color_pair(1)
+            elif item["kind"] == "agent":
+                attr = curses.color_pair(2)
+            else:
+                attr = curses.A_DIM
             if item["key"] == selected_key:
                 attr |= curses.A_REVERSE
         else:
