@@ -109,13 +109,24 @@ def build_rows(windows, sessions):
         rows.append(("", None))
         rows.append((f" {agent.upper()}", "header"))
         rows.append(("", None))
-        for s in (s for s in sessions if s["agent"] == agent):
-            w = s["window"]
-            name = os.path.basename(s["cwd"].rstrip("/")) or s["cwd"]
+        agent_sessions = [s for s in sessions if s["agent"] == agent]
+        for w in windows:
+            group = [s for s in agent_sessions if s["window"] is w]
+            if not group:
+                continue
+            marker = "*" if w["active"] else " "
             rows.append(
-                (f"  {name}  [{w['index']}: {w['name']}]",
-                 {"kind": "agent", "key": ("a", s["id"]), "win": w, "pane": s["pane"]})
+                (f"{marker} {w['index']}: {w['name']}",
+                 {"kind": "window", "key": ("w", agent, w["id"]), "win": w})
             )
+            last = len(group) - 1
+            for i, s in enumerate(group):
+                branch = "└─" if i == last else "├─"
+                name = os.path.basename(s["cwd"].rstrip("/")) or s["cwd"]
+                rows.append(
+                    (f"   {branch} {name}",
+                     {"kind": "agent", "key": ("a", s["id"]), "win": w, "pane": s["pane"]})
+                )
     return rows
 
 
