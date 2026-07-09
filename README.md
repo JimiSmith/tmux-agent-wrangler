@@ -68,18 +68,24 @@ Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
 start hook records the pane, cwd, and the agent's PID; the sidebar prunes an
 entry when its pane disappears or its process exits.
 
+The examples below assume the default TPM install path,
+`~/.tmux/plugins/tmux-agent-wrangler`. To confirm where TPM put the plugin,
+run `tmux show-environment -g TMUX_PLUGIN_MANAGER_PATH` — the plugin lives in
+a `tmux-agent-wrangler` directory under that path. If you installed manually,
+use the directory you cloned instead.
+
 ### Claude Code
 
-Register the hooks in `~/.claude/settings.json` (adjust the path):
+Register the hooks in `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "~/Development/adhoc/tmux-agent-wrangler/scripts/agent-hook.sh claude start" }] }
+      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude start" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "~/Development/adhoc/tmux-agent-wrangler/scripts/agent-hook.sh claude end" }] }
+      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude end" }] }
     ]
   }
 }
@@ -87,14 +93,14 @@ Register the hooks in `~/.claude/settings.json` (adjust the path):
 
 ### Copilot CLI
 
-Create `~/.copilot/hooks/wrangler.json` (adjust the path):
+Create `~/.copilot/hooks/wrangler.json`:
 
 ```json
 {
   "version": 1,
   "hooks": {
     "sessionStart": [
-      { "type": "command", "bash": "~/Development/adhoc/tmux-agent-wrangler/scripts/agent-hook.sh copilot start" }
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot start" }
     ]
   }
 }
