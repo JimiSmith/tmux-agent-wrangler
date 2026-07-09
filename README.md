@@ -42,6 +42,32 @@ run-shell /path/to/tmux-agent-wrangler/wrangler.tmux
 - mouse click on a window line — focus it
 - `q` — close the sidebar
 
+## Claude Code sessions
+
+The sidebar shows a `CLAUDE` section below the windows listing active Claude
+Code sessions running inside the tmux session. Selecting one focuses its
+window and pane.
+
+Register the hooks in `~/.claude/settings.json` (adjust the path):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "~/Development/adhoc/tmux-agent-wrangler/scripts/claude-hook.sh start" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "~/Development/adhoc/tmux-agent-wrangler/scripts/claude-hook.sh end" }] }
+    ]
+  }
+}
+```
+
+Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
+`~/.local/state/...`). Entries are removed on SessionEnd and pruned by the
+sidebar when their pane disappears; a session that dies without firing
+SessionEnd (e.g. a crash) lingers until its pane closes.
+
 ## Options
 
 ```tmux
