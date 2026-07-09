@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Sidebar TUI for tmux-agent-wrangler.
 
-Lists the session's windows with their panes as a tree, plus active Claude
-Code sessions registered by scripts/claude-hook.sh. Windows and Claude
-sessions are the interactive rows: Up/Down or j/k to move, Enter or a mouse
-click to focus. The sidebar moves itself into the target window before
-selecting it, so it stays visible.
+Lists the session's windows with their panes as a tree, plus active agent
+sessions (Claude Code, Copilot CLI, ...) registered by scripts/agent-hook.sh,
+one section per agent. Windows and agent sessions are the interactive rows:
+Up/Down or j/k to move, Enter or a mouse click to focus. The sidebar moves
+itself into the target window before selecting it, so it stays visible.
 """
 import curses
 import locale
@@ -53,8 +53,18 @@ def fetch_windows():
     return windows, pane_to_window
 
 
-def fetch_claude_sessions(pane_to_window):
-    """Read the hook registry; prune entries whose pane no longer exists."""
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass
+    return True
+
+
+def fetch_agent_sessions(pane_to_window):
+    """Read the hook registry; prune entries whose pane or process is gone."""
     try:
         names = sorted(os.listdir(REGISTRY))
     except OSError:
@@ -64,17 +74,23 @@ def fetch_claude_sessions(pane_to_window):
         path = os.path.join(REGISTRY, name)
         try:
             with open(path) as f:
-                pane, cwd = f.read().strip().split("\t", 1)
-        except (OSError, ValueError):
+                fields = f.read().strip().split("\t")
+        except OSError:
+            continue
+        if len(fields) == 2:  # legacy claude-hook.sh format: pane, cwd
+            pane, agent, pid, cwd = fields[0], "claude", "", fields[1]
+        elif len(fields) >= 4:  # pane, agent, pid, cwd
+            pane, agent, pid, cwd = fields[0], fields[1], fields[2], fields[3]
+        else:
             continue
         window = pane_to_window.get(pane)
-        if window is None:
+        if window is None or (pid.isdigit() and not pid_alive(int(pid))):
             try:
                 os.unlink(path)
             except OSError:
                 pass
             continue
-        sessions.append({"id": name, "pane": pane, "cwd": cwd, "window": window})
+        sessions.append({"id": name, "agent": agent, "pane": pane, "cwd": cwd, "window": window})
     return sessions
 
 
@@ -89,16 +105,16 @@ def build_rows(windows, sessions):
             branch = "└─" if i == last else "├─"
             active = "*" if p["active"] else " "
             rows.append((f"   {branch}{active}{p['index']}: {p['cmd']}", None))
-    if sessions:
+    for agent in sorted({s["agent"] for s in sessions}):
         rows.append(("", None))
-        rows.append((" CLAUDE", "header"))
+        rows.append((f" {agent.upper()}", "header"))
         rows.append(("", None))
-        for s in sessions:
+        for s in (s for s in sessions if s["agent"] == agent):
             w = s["window"]
             name = os.path.basename(s["cwd"].rstrip("/")) or s["cwd"]
             rows.append(
                 (f"  {name}  [{w['index']}: {w['name']}]",
-                 {"kind": "claude", "key": ("c", s["id"]), "win": w, "pane": s["pane"]})
+                 {"kind": "agent", "key": ("a", s["id"]), "win": w, "pane": s["pane"]})
             )
     return rows
 
@@ -173,7 +189,7 @@ def main(stdscr):
         windows, pane_to_window = fetch_windows()
         if not windows:
             return
-        sessions = fetch_claude_sessions(pane_to_window)
+        sessions = fetch_agent_sessions(pane_to_window)
         rows = build_rows(windows, sessions)
         items = [item for _, item in rows if isinstance(item, dict)]
         keys = [item["key"] for item in items]

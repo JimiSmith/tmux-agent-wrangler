@@ -42,11 +42,18 @@ run-shell /path/to/tmux-agent-wrangler/wrangler.tmux
 - mouse click on a window line — focus it
 - `q` — close the sidebar
 
-## Claude Code sessions
+## Agent sessions
 
-The sidebar shows a `CLAUDE` section below the windows listing active Claude
-Code sessions running inside the tmux session. Selecting one focuses its
-window and pane.
+The sidebar shows a section per agent below the windows (`CLAUDE`, `COPILOT`,
+...) listing active sessions running inside the tmux session. Selecting one
+focuses its window and pane.
+
+Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
+`~/.local/state/...`) via `scripts/agent-hook.sh <agent> <start|end>`. The
+start hook records the pane, cwd, and the agent's PID; the sidebar prunes an
+entry when its pane disappears or its process exits.
+
+### Claude Code
 
 Register the hooks in `~/.claude/settings.json` (adjust the path):
 
@@ -54,19 +61,38 @@ Register the hooks in `~/.claude/settings.json` (adjust the path):
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "~/Development/adhoc/tmux-agent-wrangler/scripts/claude-hook.sh start" }] }
+      { "hooks": [{ "type": "command", "command": "~/Development/adhoc/tmux-agent-wrangler/scripts/agent-hook.sh claude start" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "~/Development/adhoc/tmux-agent-wrangler/scripts/claude-hook.sh end" }] }
+      { "hooks": [{ "type": "command", "command": "~/Development/adhoc/tmux-agent-wrangler/scripts/agent-hook.sh claude end" }] }
     ]
   }
 }
 ```
 
-Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
-`~/.local/state/...`). Entries are removed on SessionEnd and pruned by the
-sidebar when their pane disappears; a session that dies without firing
-SessionEnd (e.g. a crash) lingers until its pane closes.
+### Copilot CLI
+
+Create `~/.copilot/hooks/wrangler.json` (adjust the path):
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      { "type": "command", "bash": "~/Development/adhoc/tmux-agent-wrangler/scripts/agent-hook.sh copilot start" }
+    ]
+  }
+}
+```
+
+Copilot CLI fires its lifecycle hooks per prompt-cycle rather than per session
+([copilot-cli#991](https://github.com/github/copilot-cli/issues/991)). Two
+consequences:
+
+- a session only appears in the sidebar once its first message is sent
+  (`sessionStart` does not fire at launch);
+- `sessionEnd` is deliberately not registered, since it would remove the
+  entry after every response. Cleanup relies on PID pruning instead.
 
 ## Options
 
