@@ -10,9 +10,24 @@ it moves itself into whichever window becomes current.
 
 * 1: vim
    ├─ 1: vim
-   └─*2: zsh
+   └─*2: claude
   2: server
    └─ 1: node
+  3: agents
+   ├─ 1: claude
+   └─ 2: copilot
+
+ CLAUDE
+
+* 1: vim
+   └─ api-service
+  3: agents
+   └─ frontend
+
+ COPILOT
+
+  3: agents
+   └─ docs
 ```
 
 ## Requirements
