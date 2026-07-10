@@ -71,20 +71,24 @@ def fetch_windows():
 
     by_id = {w["id"]: w for w in windows}
     pane_to_window = {}
+    pane_paths = {}
     sidebars = set()
+    # pane_current_path sits before pane_title so the free-form title stays the
+    # trailing field; a path is very unlikely to contain a tab.
     for line in tmux(
         "list-panes", "-s", "-F",
-        "#{window_id}\t#{pane_id}\t#{pane_index}\t#{pane_active}\t#{@wrangler_sidebar}\t#{pane_title}",
+        "#{window_id}\t#{pane_id}\t#{pane_index}\t#{pane_active}\t#{@wrangler_sidebar}\t#{pane_current_path}\t#{pane_title}",
     ).splitlines():
-        wid, pid, index, active, flag, title = line.split("\t", 5)
+        wid, pid, index, active, flag, path, title = line.split("\t", 6)
         if wid not in by_id:
             continue
         pane_to_window[pid] = by_id[wid]
+        pane_paths[pid] = path
         if flag == "1" or pid == SIDEBAR_PANE:
             sidebars.add(pid)
             continue
         by_id[wid]["panes"].append({"id": pid, "index": index, "active": active == "1", "title": title})
-    return windows, pane_to_window, sidebars
+    return windows, pane_to_window, sidebars, pane_paths
 
 
 def pid_alive(pid):
@@ -97,7 +101,7 @@ def pid_alive(pid):
     return True
 
 
-def fetch_agent_sessions(pane_to_window, focused_panes):
+def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
     """Read the hook registry; prune entries whose pane or process is gone.
 
     A session carries a turn status set by agent-hook.sh: "working" while a
@@ -106,6 +110,10 @@ def fetch_agent_sessions(pane_to_window, focused_panes):
     focused pane, meaning "wanted attention while you were not looking at it";
     the working marker persists until the turn ends, since it reflects the
     agent actually being busy.
+
+    The displayed cwd tracks the pane's live path (pane_paths) so it follows
+    the agent as it changes directory, falling back to the cwd recorded at
+    registration if the pane reports no path.
     """
     try:
         names = sorted(os.listdir(REGISTRY))
@@ -144,7 +152,8 @@ def fetch_agent_sessions(pane_to_window, focused_panes):
             attention = False
         status = "attention" if attention else ("working" if os.path.exists(work_marker) else "")
         sessions.append(
-            {"id": name, "agent": agent, "pane": pane, "cwd": cwd, "window": window, "status": status}
+            {"id": name, "agent": agent, "pane": pane, "cwd": pane_paths.get(pane) or cwd,
+             "window": window, "status": status}
         )
     return sessions
 
@@ -298,7 +307,7 @@ def main(stdscr):
     relayout_grace = 0
 
     while True:
-        windows, pane_to_window, sidebars = fetch_windows()
+        windows, pane_to_window, sidebars, pane_paths = fetch_windows()
         if not windows:
             return
         me = pane_to_window.get(SIDEBAR_PANE)
@@ -360,7 +369,7 @@ def main(stdscr):
         # The focused pane is the active pane of the active window; a session
         # there has its attention dot cleared.
         focused_panes = {p["id"] for w in windows if w["active"] for p in w["panes"] if p["active"]}
-        sessions = fetch_agent_sessions(pane_to_window, focused_panes)
+        sessions = fetch_agent_sessions(pane_to_window, focused_panes, pane_paths)
         rows = build_rows(windows, sessions)
         items = [item for _, item in rows if isinstance(item, dict)]
         keys = [item["key"] for item in items]
