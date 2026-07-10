@@ -77,8 +77,11 @@ your agents are doing:
 
 The two are mutually exclusive: starting a turn replaces the dot with `◐`,
 finishing one replaces `◐` with the dot. The annotations are optional; they
-need the turn-state hooks below (Claude Code's `UserPromptSubmit`, `Stop`, and
-`Notification`; Copilot CLI's `sessionStart` and `sessionEnd`).
+come from two families of hooks wired below — `working` on every event that
+begins a turn, and `needsAttention` on every event that ends one or hands
+control back to you (a stop, an error, a notification, or a permission
+prompt). Wire as many of each family as your agent fires; more coverage just
+means the state flips sooner.
 
 Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
 `~/.local/state/...`) via `scripts/agent-hook.sh <agent> <start|end|working|needsAttention>`.
@@ -110,7 +113,13 @@ Register the hooks in `~/.claude/settings.json`:
     "Stop": [
       { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
     ],
+    "StopFailure": [
+      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
+    ],
     "Notification": [
+      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
+    ],
+    "PermissionRequest": [
       { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
     ]
   }
@@ -129,6 +138,21 @@ Create `~/.copilot/hooks/wrangler.json`:
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot start" },
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
     ],
+    "userPromptSubmitted": [
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+    ],
+    "agentStop": [
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
+    ],
+    "errorOccurred": [
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
+    ],
+    "notification": [
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
+    ],
+    "permissionRequest": [
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
+    ],
     "sessionEnd": [
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
     ]
@@ -137,18 +161,18 @@ Create `~/.copilot/hooks/wrangler.json`:
 ```
 
 Copilot CLI fires its lifecycle hooks per prompt-cycle rather than per session
-([copilot-cli#991](https://github.com/github/copilot-cli/issues/991)). Two
-consequences:
+([copilot-cli#991](https://github.com/github/copilot-cli/issues/991)). So:
 
 - a session only appears in the sidebar once its first message is sent
   (`sessionStart` does not fire at launch);
 - `sessionStart` doubles as the turn-start signal, so it maps to both `start`
   (register) and `working` — `start` first, so the session is registered
-  before `working` marks it;
-- `sessionEnd` is mapped to `needsAttention`, not `end`: firing per
-  prompt-cycle makes it the turn-finished signal that lights the dot, whereas
-  `end` would remove the session after every response. Session cleanup relies
-  on PID pruning instead.
+  before `working` marks it. `userPromptSubmitted` also maps to `working`;
+- the turn-ending events (`agentStop`, `errorOccurred`, `notification`,
+  `permissionRequest`, `sessionEnd`) all map to `needsAttention`, never `end`:
+  firing per prompt-cycle, an `end` would remove the session after every
+  response. No `end` is wired at all, so session cleanup relies on PID pruning
+  instead.
 
 ## Options
 
