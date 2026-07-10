@@ -22,14 +22,14 @@ sidebar that follows you.
  CLAUDE
 
 * 1: vim
-   └─ api-service
+   └─ api-service ●
   3: agents
-   └─ frontend
+   └─ frontend ◐
 
  COPILOT
 
   3: agents
-   └─ docs
+   └─ docs ◐
 ```
 
 ## Requirements
@@ -65,17 +65,25 @@ The sidebar shows a section per agent below the windows (`CLAUDE`, `COPILOT`,
 ...) listing active sessions running inside the tmux session. Selecting one
 focuses its window and pane.
 
-A session gets a `●` dot when the agent wants your attention — it finished a
-turn, or raised a notification (e.g. a permission prompt) — so you can see at
-a glance which agents are waiting on you. The dot clears as soon as you focus
-that session's pane, so it means "wanted your attention while you were not
-looking at it". Wiring the dot is optional: it needs the attention hooks below
-(Claude Code's `Stop` and `Notification`, Copilot CLI's `sessionEnd`).
+Each session is annotated with its turn state, so you can see at a glance what
+your agents are doing:
+
+- `◐` — working: a turn is in progress. Shown from turn start until it ends,
+  whether or not you are looking at the pane.
+- `●` — attention: the agent finished a turn or raised a notification (e.g. a
+  permission prompt) and is waiting on you. The dot clears as soon as you focus
+  that session's pane, so it means "wanted your attention while you were not
+  looking at it".
+
+The two are mutually exclusive: starting a turn replaces the dot with `◐`,
+finishing one replaces `◐` with the dot. The annotations are optional; they
+need the turn-state hooks below (Claude Code's `UserPromptSubmit`, `Stop`, and
+`Notification`; Copilot CLI's `sessionStart` and `sessionEnd`).
 
 Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
-`~/.local/state/...`) via `scripts/agent-hook.sh <agent> <start|end>`. The
-start hook records the pane, cwd, and the agent's PID; the sidebar prunes an
-entry when its pane disappears or its process exits.
+`~/.local/state/...`) via `scripts/agent-hook.sh <agent> <start|end|working|needsAttention>`.
+The start hook records the pane, cwd, and the agent's PID; the sidebar prunes
+an entry when its pane disappears or its process exits.
 
 The examples below assume the default TPM install path,
 `~/.tmux/plugins/tmux-agent-wrangler`. To confirm where TPM put the plugin,
@@ -96,6 +104,9 @@ Register the hooks in `~/.claude/settings.json`:
     "SessionEnd": [
       { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude end" }] }
     ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
+    ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
     ],
@@ -115,7 +126,8 @@ Create `~/.copilot/hooks/wrangler.json`:
   "version": 1,
   "hooks": {
     "sessionStart": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot start" }
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot start" },
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
     ],
     "sessionEnd": [
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
@@ -130,6 +142,9 @@ consequences:
 
 - a session only appears in the sidebar once its first message is sent
   (`sessionStart` does not fire at launch);
+- `sessionStart` doubles as the turn-start signal, so it maps to both `start`
+  (register) and `working` — `start` first, so the session is registered
+  before `working` marks it;
 - `sessionEnd` is mapped to `needsAttention`, not `end`: firing per
   prompt-cycle makes it the turn-finished signal that lights the dot, whereas
   `end` would remove the session after every response. Session cleanup relies

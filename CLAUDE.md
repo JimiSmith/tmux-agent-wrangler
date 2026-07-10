@@ -31,10 +31,10 @@ pane's stderr is visible, or temporarily wrap the loop.
 
 State lives under `$XDG_STATE_HOME/tmux-agent-wrangler` (default
 `~/.local/state/tmux-agent-wrangler`): `sessions/` (agent registry, one file
-per session), `attention/` (turn-finished markers, one file per session that
-mirrors its `sessions/` filename), `selection` (shared highlighted row), and
-`width` (shared sidebar width). Deleting this directory resets all cross-pane
-state.
+per session), `attention/` and `working/` (turn-state markers, one file per
+session that mirrors its `sessions/` filename), `selection` (shared
+highlighted row), and `width` (shared sidebar width). Deleting this directory
+resets all cross-pane state.
 
 ## Architecture
 
@@ -77,19 +77,23 @@ independent instances behaving as one.
     `relayout_grace` covers the two ticks around a pane-set change.
 
 - **`scripts/agent-hook.sh`** — registers/unregisters an agent session in
-  `sessions/` and flags turn completion in `attention/`. Called from the
-  agent's own lifecycle hooks as `agent-hook.sh <agent> <start|end|needsAttention>`
-  with the hook JSON on stdin (parses both Claude Code snake_case and Copilot
-  CLI camelCase). The start record is `pane<TAB>agent<TAB>pid<TAB>cwd`; it walks
-  the process ancestry to find the agent's PID so the sidebar can prune the
-  entry when the process dies. This PID-pruning exists because not every agent
-  fires a reliable `end` event (Copilot CLI fires hooks per prompt-cycle, so its
-  `sessionEnd` maps to `needsAttention`, not `end` — see README).
-  `needsAttention` (fired by Claude Code's `Stop` and `Notification` hooks)
-  writes an `attention/` marker (only for an already-registered session, so
-  stray events leave no orphan); the sidebar shows a `●` on that session and
-  deletes the marker once its pane is focused. `sidebar.py` prunes any registry
-  entry (and its marker) whose pane is gone or whose PID is dead.
+  `sessions/` and flags its turn state in `working/` and `attention/`. Called
+  from the agent's own lifecycle hooks as
+  `agent-hook.sh <agent> <start|end|working|needsAttention>` with the hook JSON
+  on stdin (parses both Claude Code snake_case and Copilot CLI camelCase). The
+  start record is `pane<TAB>agent<TAB>pid<TAB>cwd`; it walks the process
+  ancestry to find the agent's PID so the sidebar can prune the entry when the
+  process dies. This PID-pruning exists because not every agent fires a reliable
+  `end` event (Copilot CLI fires hooks per prompt-cycle, so its `sessionEnd`
+  maps to `needsAttention`, not `end` — see README). `working` (Claude Code's
+  `UserPromptSubmit`; Copilot's per-cycle `sessionStart`) and `needsAttention`
+  (Claude Code's `Stop` / `Notification`; Copilot's `sessionEnd`) each write
+  their marker and delete the other's, so the two are mutually exclusive; both
+  only mark an already-registered session, so stray events leave no orphan. The
+  sidebar renders `◐` for working and `●` for attention, and deletes the
+  attention marker once its pane is focused (the working marker persists until
+  the turn ends). `sidebar.py` prunes any registry entry (and both markers)
+  whose pane is gone or whose PID is dead.
 
 ## Conventions
 

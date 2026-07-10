@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Generic agent session hook: registers/unregisters a session in the wrangler
-# registry so the sidebar can list it, and flags a session that wants attention
-# (finished a turn, or raised a notification) so the sidebar can dot it.
-# Usage: agent-hook.sh <agent> <start|end|needsAttention>
+# registry so the sidebar can list it, and flags its turn state so the sidebar
+# can annotate it: `working` while a turn is in progress, `needsAttention` once
+# it finishes a turn or raises a notification. The two states are mutually
+# exclusive; each clears the other.
+# Usage: agent-hook.sh <agent> <start|end|working|needsAttention>
 # Reads the hook JSON payload on stdin (Claude Code snake_case or Copilot CLI
 # camelCase). Exits silently outside tmux.
 set -euo pipefail
@@ -10,6 +12,7 @@ set -euo pipefail
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-wrangler"
 REGISTRY="$STATE/sessions"
 ATTENTION="$STATE/attention"
+WORKING="$STATE/working"
 
 agent="${1:?agent name required}"
 event="${2:-start}"
@@ -27,17 +30,28 @@ session_id="${session_id//\//_}"
 [ -z "$session_id" ] && exit 0
 
 if [ "$event" = "end" ]; then
-  rm -f "$REGISTRY/$agent-$session_id" "$ATTENTION/$agent-$session_id"
+  rm -f "$REGISTRY/$agent-$session_id" "$ATTENTION/$agent-$session_id" "$WORKING/$agent-$session_id"
   exit 0
 fi
 
-# Wants attention (turn finished / notification): flag the session so the
-# sidebar dots it. Only mark sessions we already track, so an event from an
+# Turn state changes. Only mark sessions we already track, so an event from an
 # agent running outside tmux (never registered) leaves no orphan marker.
+#
+# working: a turn started; clears any pending attention.
+if [ "$event" = "working" ]; then
+  [ -f "$REGISTRY/$agent-$session_id" ] || exit 0
+  mkdir -p "$WORKING"
+  : > "$WORKING/$agent-$session_id"
+  rm -f "$ATTENTION/$agent-$session_id"
+  exit 0
+fi
+
+# needsAttention: a turn finished or a notification fired; clears working.
 if [ "$event" = "needsAttention" ]; then
   [ -f "$REGISTRY/$agent-$session_id" ] || exit 0
   mkdir -p "$ATTENTION"
   : > "$ATTENTION/$agent-$session_id"
+  rm -f "$WORKING/$agent-$session_id"
   exit 0
 fi
 

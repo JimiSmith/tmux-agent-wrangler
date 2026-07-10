@@ -23,6 +23,7 @@ STATE_DIR = os.path.join(
 )
 REGISTRY = os.path.join(STATE_DIR, "sessions")
 ATTENTION = os.path.join(STATE_DIR, "attention")
+WORKING = os.path.join(STATE_DIR, "working")
 SELECTION_FILE = os.path.join(STATE_DIR, "selection")
 WIDTH_FILE = os.path.join(STATE_DIR, "width")
 
@@ -99,10 +100,12 @@ def pid_alive(pid):
 def fetch_agent_sessions(pane_to_window, focused_panes):
     """Read the hook registry; prune entries whose pane or process is gone.
 
-    A session carries an attention flag when agent-hook.sh has marked it as
-    having finished a turn. The flag (and its marker file) is cleared once the
-    session's pane is the focused pane, so the dot means "finished a turn while
-    you were not looking at it".
+    A session carries a turn status set by agent-hook.sh: "working" while a
+    turn is in progress, "attention" once it finishes a turn or notifies. The
+    attention marker (and so the dot) clears once the session's pane is the
+    focused pane, meaning "wanted attention while you were not looking at it";
+    the working marker persists until the turn ends, since it reflects the
+    agent actually being busy.
     """
     try:
         names = sorted(os.listdir(REGISTRY))
@@ -111,7 +114,8 @@ def fetch_agent_sessions(pane_to_window, focused_panes):
     sessions = []
     for name in names:
         path = os.path.join(REGISTRY, name)
-        marker = os.path.join(ATTENTION, name)
+        attn_marker = os.path.join(ATTENTION, name)
+        work_marker = os.path.join(WORKING, name)
         try:
             with open(path) as f:
                 fields = f.read().strip().split("\t")
@@ -125,21 +129,22 @@ def fetch_agent_sessions(pane_to_window, focused_panes):
             continue
         window = pane_to_window.get(pane)
         if window is None or (pid.isdigit() and not pid_alive(int(pid))):
-            for stale in (path, marker):
+            for stale in (path, attn_marker, work_marker):
                 try:
                     os.unlink(stale)
                 except OSError:
                     pass
             continue
-        attention = os.path.exists(marker)
+        attention = os.path.exists(attn_marker)
         if attention and pane in focused_panes:
             try:
-                os.unlink(marker)
+                os.unlink(attn_marker)
             except OSError:
                 pass
             attention = False
+        status = "attention" if attention else ("working" if os.path.exists(work_marker) else "")
         sessions.append(
-            {"id": name, "agent": agent, "pane": pane, "cwd": cwd, "window": window, "attention": attention}
+            {"id": name, "agent": agent, "pane": pane, "cwd": cwd, "window": window, "status": status}
         )
     return sessions
 
@@ -194,11 +199,11 @@ def build_rows(windows, sessions):
             for i, s in enumerate(group):
                 branch = "└─" if i == last else "├─"
                 name = os.path.basename(s["cwd"].rstrip("/")) or s["cwd"]
-                dot = " ●" if s["attention"] else ""
+                glyph = {"attention": " ●", "working": " ◐"}.get(s["status"], "")
                 rows.append(
-                    (f"   {branch} {name}{dot}",
+                    (f"   {branch} {name}{glyph}",
                      {"kind": "agent", "key": ("a", s["id"]), "win": w, "pane": s["pane"],
-                      "attention": s["attention"]})
+                      "status": s["status"]})
                 )
     return rows
 
@@ -254,8 +259,10 @@ def draw(stdscr, rows, selected_key, offset):
                     attr |= curses.color_pair(1)
             elif item["kind"] == "agent":
                 attr = curses.color_pair(2)
-                if item["attention"]:
+                if item["status"] == "attention":
                     attr = curses.color_pair(3) | curses.A_BOLD
+                elif item["status"] == "working":
+                    attr = curses.color_pair(2) | curses.A_BOLD
             else:
                 attr = curses.A_DIM
             if item["key"] == selected_key:
