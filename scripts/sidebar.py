@@ -264,31 +264,10 @@ def main(stdscr):
     sync = sync_width_enabled()
     last_width = stdscr.getmaxyx()[1]
     pending_width = None
+    last_pane_set = None
+    relayout_grace = 0
 
     while True:
-        # Enforce the minimum width and keep widths in sync. A width change
-        # we did not request ourselves (i.e. a user resize) is clamped to
-        # the floor and published; an unchanged width adopts a differing
-        # published one. pending_width marks our own resize-pane requests so
-        # their landing is not mistaken for a user resize and republished.
-        width_now = stdscr.getmaxyx()[1]
-        if width_now != last_width:
-            requested = pending_width
-            pending_width = None
-            if width_now != requested:
-                target = max(width_now, floor)
-                if target != width_now:
-                    tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(target))
-                    pending_width = target
-                if sync and read_width() != target:
-                    write_width(target)
-        elif sync and pending_width is None:
-            shared_width = read_width()
-            if shared_width and shared_width >= floor and shared_width != width_now:
-                tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(shared_width))
-                pending_width = shared_width
-        last_width = width_now
-
         windows, pane_to_window, sidebars = fetch_windows()
         if not windows:
             return
@@ -302,6 +281,48 @@ def main(stdscr):
                 return
         if not me["panes"]:
             return
+
+        # A change in this window's pane set means an imminent width change
+        # is tmux redistributing space, not a user resize. The grace covers
+        # the following tick too, since the resize event and the pane-list
+        # fetch are not ordered.
+        my_panes = {p["id"] for p in me["panes"]}
+        if last_pane_set is not None and my_panes != last_pane_set:
+            relayout_grace = 2
+        last_pane_set = my_panes
+
+        # Enforce the minimum width and keep widths in sync. A width change
+        # we did not request ourselves (i.e. a user resize) is clamped to
+        # the floor and published; a relayout-caused one is snapped back; an
+        # unchanged width adopts a differing published one. pending_width
+        # marks our own resize-pane requests so their landing is not
+        # mistaken for a user resize and republished.
+        width_now = stdscr.getmaxyx()[1]
+        if width_now != last_width:
+            requested = pending_width
+            pending_width = None
+            if width_now != requested:
+                if relayout_grace:
+                    restore = read_width() if sync else None
+                    if not restore or restore < floor:
+                        restore = max(last_width, floor)
+                    if restore != width_now:
+                        tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(restore))
+                        pending_width = restore
+                else:
+                    target = max(width_now, floor)
+                    if target != width_now:
+                        tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(target))
+                        pending_width = target
+                    if sync and read_width() != target:
+                        write_width(target)
+        elif sync and pending_width is None:
+            shared_width = read_width()
+            if shared_width and shared_width >= floor and shared_width != width_now:
+                tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(shared_width))
+                pending_width = shared_width
+        last_width = width_now
+        relayout_grace = max(0, relayout_grace - 1)
 
         shared = read_selection()
         if shared:
