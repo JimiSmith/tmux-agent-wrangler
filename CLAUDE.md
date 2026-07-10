@@ -78,13 +78,14 @@ independent instances behaving as one.
 
 - **`scripts/agent-hook.sh`** — registers/unregisters an agent session in
   `sessions/` and flags turn completion in `attention/`. Called from the
-  agent's own lifecycle hooks as `agent-hook.sh <agent> <start|end|turnFinished>`
+  agent's own lifecycle hooks as `agent-hook.sh <agent> <start|end|needsAttention>`
   with the hook JSON on stdin (parses both Claude Code snake_case and Copilot
   CLI camelCase). The start record is `pane<TAB>agent<TAB>pid<TAB>cwd`; it walks
   the process ancestry to find the agent's PID so the sidebar can prune the
   entry when the process dies. This PID-pruning exists because not every agent
   fires a reliable `end` event (Copilot CLI fires hooks per prompt-cycle, so its
-  `sessionEnd` maps to `turnFinished`, not `end` — see README). `turnFinished`
+  `sessionEnd` maps to `needsAttention`, not `end` — see README).
+  `needsAttention` (fired by Claude Code's `Stop` and `Notification` hooks)
   writes an `attention/` marker (only for an already-registered session, so
   stray events leave no orphan); the sidebar shows a `●` on that session and
   deletes the marker once its pane is focused. `sidebar.py` prunes any registry
