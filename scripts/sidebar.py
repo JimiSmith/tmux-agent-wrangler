@@ -263,19 +263,31 @@ def main(stdscr):
     floor = min_width()
     sync = sync_width_enabled()
     last_width = stdscr.getmaxyx()[1]
+    pending_width = None
 
     while True:
-        # Keep sidebar widths in sync: publish our width when it changed
-        # (user resize), otherwise adopt a differing published width.
-        if sync:
-            width_now = stdscr.getmaxyx()[1]
+        # Enforce the minimum width and keep widths in sync. A width change
+        # we did not request ourselves (i.e. a user resize) is clamped to
+        # the floor and published; an unchanged width adopts a differing
+        # published one. pending_width marks our own resize-pane requests so
+        # their landing is not mistaken for a user resize and republished.
+        width_now = stdscr.getmaxyx()[1]
+        if width_now != last_width:
+            requested = pending_width
+            pending_width = None
+            if width_now != requested:
+                target = max(width_now, floor)
+                if target != width_now:
+                    tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(target))
+                    pending_width = target
+                if sync and read_width() != target:
+                    write_width(target)
+        elif sync and pending_width is None:
             shared_width = read_width()
-            if width_now != last_width and width_now >= floor:
-                if shared_width != width_now:
-                    write_width(width_now)
-            elif shared_width and shared_width >= floor and shared_width != width_now:
+            if shared_width and shared_width >= floor and shared_width != width_now:
                 tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(shared_width))
-            last_width = width_now
+                pending_width = shared_width
+        last_width = width_now
 
         windows, pane_to_window, sidebars = fetch_windows()
         if not windows:
@@ -306,8 +318,6 @@ def main(stdscr):
 
         ch = stdscr.getch()
         if ch == curses.KEY_RESIZE:
-            if stdscr.getmaxyx()[1] < floor:
-                tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(floor))
             continue
         if ch in (ord("q"), ord("Q")):
             # Close every sidebar, not just this one. The server must run the
