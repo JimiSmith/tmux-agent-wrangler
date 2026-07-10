@@ -13,6 +13,8 @@ if [ -n "$sidebars" ]; then
   exit 0
 fi
 
+rm -f "${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-wrangler/width"
+
 for win in $(tmux list-windows -F '#{window_id}'); do
   "$CURRENT_DIR/spawn.sh" "$win"
 done

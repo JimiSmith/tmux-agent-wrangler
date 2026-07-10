@@ -23,6 +23,7 @@ STATE_DIR = os.path.join(
 )
 REGISTRY = os.path.join(STATE_DIR, "sessions")
 SELECTION_FILE = os.path.join(STATE_DIR, "selection")
+WIDTH_FILE = os.path.join(STATE_DIR, "width")
 
 
 def tmux(*args):
@@ -33,6 +34,29 @@ def tmux(*args):
 def min_width():
     value = tmux("show-option", "-gqv", "@wrangler-min-width").strip()
     return int(value) if value.isdigit() else 24
+
+
+def sync_width_enabled():
+    value = tmux("show-option", "-gqv", "@wrangler-sync-width").strip().lower()
+    return value not in ("off", "0", "no", "false")
+
+
+def read_width():
+    try:
+        with open(WIDTH_FILE) as f:
+            value = f.read().strip()
+    except OSError:
+        return None
+    return int(value) if value.isdigit() else None
+
+
+def write_width(width):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(WIDTH_FILE, "w") as f:
+            f.write(str(width))
+    except OSError:
+        pass
 
 
 def fetch_windows():
@@ -237,8 +261,22 @@ def main(stdscr):
     selected_key = None
     offset = 0
     floor = min_width()
+    sync = sync_width_enabled()
+    last_width = stdscr.getmaxyx()[1]
 
     while True:
+        # Keep sidebar widths in sync: publish our width when it changed
+        # (user resize), otherwise adopt a differing published width.
+        if sync:
+            width_now = stdscr.getmaxyx()[1]
+            shared_width = read_width()
+            if width_now != last_width and width_now >= floor:
+                if shared_width != width_now:
+                    write_width(width_now)
+            elif shared_width and shared_width >= floor and shared_width != width_now:
+                tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(shared_width))
+            last_width = width_now
+
         windows, pane_to_window, sidebars = fetch_windows()
         if not windows:
             return

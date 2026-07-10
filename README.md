@@ -123,4 +123,5 @@ consequences:
 set -g @wrangler-key 'Tab'   # toggle key (bound with prefix)
 set -g @wrangler-width 32      # sidebar width in columns
 set -g @wrangler-min-width 24  # sidebar snaps back if squeezed below this
+set -g @wrangler-sync-width on # resizing one sidebar resizes them all ('off' to disable)
 ```
