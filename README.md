@@ -65,6 +65,12 @@ The sidebar shows a section per agent below the windows (`CLAUDE`, `COPILOT`,
 ...) listing active sessions running inside the tmux session. Selecting one
 focuses its window and pane.
 
+A session gets a `●` dot when the agent finishes a turn, so you can see at a
+glance which agents are waiting on you. The dot clears as soon as you focus
+that session's pane, so it means "finished a turn while you were not looking
+at it". Wiring the dot is optional: it needs the turn-end hook below (Claude
+Code's `Stop`, Copilot CLI's `sessionEnd`).
+
 Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
 `~/.local/state/...`) via `scripts/agent-hook.sh <agent> <start|end>`. The
 start hook records the pane, cwd, and the agent's PID; the sidebar prunes an
@@ -88,6 +94,9 @@ Register the hooks in `~/.claude/settings.json`:
     ],
     "SessionEnd": [
       { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude end" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude turnFinished" }] }
     ]
   }
 }
@@ -103,6 +112,9 @@ Create `~/.copilot/hooks/wrangler.json`:
   "hooks": {
     "sessionStart": [
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot start" }
+    ],
+    "sessionEnd": [
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot turnFinished" }
     ]
   }
 }
@@ -114,8 +126,10 @@ consequences:
 
 - a session only appears in the sidebar once its first message is sent
   (`sessionStart` does not fire at launch);
-- `sessionEnd` is deliberately not registered, since it would remove the
-  entry after every response. Cleanup relies on PID pruning instead.
+- `sessionEnd` is mapped to `turnFinished`, not `end`: firing per prompt-cycle
+  makes it the turn-finished signal that lights the dot, whereas `end` would
+  remove the session after every response. Session cleanup relies on PID
+  pruning instead.
 
 ## Options
 

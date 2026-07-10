@@ -22,6 +22,7 @@ STATE_DIR = os.path.join(
     "tmux-agent-wrangler",
 )
 REGISTRY = os.path.join(STATE_DIR, "sessions")
+ATTENTION = os.path.join(STATE_DIR, "attention")
 SELECTION_FILE = os.path.join(STATE_DIR, "selection")
 WIDTH_FILE = os.path.join(STATE_DIR, "width")
 
@@ -95,8 +96,14 @@ def pid_alive(pid):
     return True
 
 
-def fetch_agent_sessions(pane_to_window):
-    """Read the hook registry; prune entries whose pane or process is gone."""
+def fetch_agent_sessions(pane_to_window, focused_panes):
+    """Read the hook registry; prune entries whose pane or process is gone.
+
+    A session carries an attention flag when agent-hook.sh has marked it as
+    having finished a turn. The flag (and its marker file) is cleared once the
+    session's pane is the focused pane, so the dot means "finished a turn while
+    you were not looking at it".
+    """
     try:
         names = sorted(os.listdir(REGISTRY))
     except OSError:
@@ -104,6 +111,7 @@ def fetch_agent_sessions(pane_to_window):
     sessions = []
     for name in names:
         path = os.path.join(REGISTRY, name)
+        marker = os.path.join(ATTENTION, name)
         try:
             with open(path) as f:
                 fields = f.read().strip().split("\t")
@@ -117,12 +125,22 @@ def fetch_agent_sessions(pane_to_window):
             continue
         window = pane_to_window.get(pane)
         if window is None or (pid.isdigit() and not pid_alive(int(pid))):
+            for stale in (path, marker):
+                try:
+                    os.unlink(stale)
+                except OSError:
+                    pass
+            continue
+        attention = os.path.exists(marker)
+        if attention and pane in focused_panes:
             try:
-                os.unlink(path)
+                os.unlink(marker)
             except OSError:
                 pass
-            continue
-        sessions.append({"id": name, "agent": agent, "pane": pane, "cwd": cwd, "window": window})
+            attention = False
+        sessions.append(
+            {"id": name, "agent": agent, "pane": pane, "cwd": cwd, "window": window, "attention": attention}
+        )
     return sessions
 
 
@@ -176,9 +194,11 @@ def build_rows(windows, sessions):
             for i, s in enumerate(group):
                 branch = "└─" if i == last else "├─"
                 name = os.path.basename(s["cwd"].rstrip("/")) or s["cwd"]
+                dot = " ●" if s["attention"] else ""
                 rows.append(
-                    (f"   {branch} {name}",
-                     {"kind": "agent", "key": ("a", s["id"]), "win": w, "pane": s["pane"]})
+                    (f"   {branch} {name}{dot}",
+                     {"kind": "agent", "key": ("a", s["id"]), "win": w, "pane": s["pane"],
+                      "attention": s["attention"]})
                 )
     return rows
 
@@ -234,6 +254,8 @@ def draw(stdscr, rows, selected_key, offset):
                     attr |= curses.color_pair(1)
             elif item["kind"] == "agent":
                 attr = curses.color_pair(2)
+                if item["attention"]:
+                    attr = curses.color_pair(3) | curses.A_BOLD
             else:
                 attr = curses.A_DIM
             if item["key"] == selected_key:
@@ -254,6 +276,7 @@ def main(stdscr):
     curses.start_color()
     curses.init_pair(1, curses.COLOR_GREEN, -1)
     curses.init_pair(2, curses.COLOR_CYAN, -1)
+    curses.init_pair(3, curses.COLOR_YELLOW, -1)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
     curses.mouseinterval(0)
     stdscr.timeout(1000)
@@ -327,7 +350,10 @@ def main(stdscr):
         shared = read_selection()
         if shared:
             selected_key = shared
-        sessions = fetch_agent_sessions(pane_to_window)
+        # The focused pane is the active pane of the active window; a session
+        # there has its attention dot cleared.
+        focused_panes = {p["id"] for w in windows if w["active"] for p in w["panes"] if p["active"]}
+        sessions = fetch_agent_sessions(pane_to_window, focused_panes)
         rows = build_rows(windows, sessions)
         items = [item for _, item in rows if isinstance(item, dict)]
         keys = [item["key"] for item in items]

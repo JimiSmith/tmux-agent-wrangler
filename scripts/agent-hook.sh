@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Generic agent session hook: registers/unregisters a session in the wrangler
-# registry so the sidebar can list it. Usage: agent-hook.sh <agent> <start|end>
+# registry so the sidebar can list it, and flags a session that has finished a
+# turn so the sidebar can dot it. Usage: agent-hook.sh <agent> <start|end|turnFinished>
 # Reads the hook JSON payload on stdin (Claude Code snake_case or Copilot CLI
 # camelCase). Exits silently outside tmux.
 set -euo pipefail
 
-REGISTRY="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-wrangler/sessions"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-wrangler"
+REGISTRY="$STATE/sessions"
+ATTENTION="$STATE/attention"
 
 agent="${1:?agent name required}"
 event="${2:-start}"
@@ -23,7 +26,17 @@ session_id="${session_id//\//_}"
 [ -z "$session_id" ] && exit 0
 
 if [ "$event" = "end" ]; then
-  rm -f "$REGISTRY/$agent-$session_id"
+  rm -f "$REGISTRY/$agent-$session_id" "$ATTENTION/$agent-$session_id"
+  exit 0
+fi
+
+# Turn finished: flag the session so the sidebar dots it. Only mark sessions
+# we already track, so a turnFinished from an agent running outside tmux (never
+# registered) does not leave an orphan marker.
+if [ "$event" = "turnFinished" ]; then
+  [ -f "$REGISTRY/$agent-$session_id" ] || exit 0
+  mkdir -p "$ATTENTION"
+  : > "$ATTENTION/$agent-$session_id"
   exit 0
 fi
 
