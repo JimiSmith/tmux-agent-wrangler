@@ -1,9 +1,11 @@
 # tmux-agent-wrangler
 
 A persistent sidebar for tmux. Lists every window in the session with its
-panes shown as a tree underneath. Windows are interactive: highlight one and
-press Enter, or click it, to focus that window. The sidebar follows you —
-it moves itself into whichever window becomes current.
+panes shown as a tree underneath. Windows, panes, and agent sessions are
+interactive: highlight one and press Enter, or click it, to focus it. Every
+window gets its own sidebar pane — switching windows never rearranges a
+layout — and the sidebars share their selection, so it feels like one
+sidebar that follows you.
 
 ```
  WINDOWS

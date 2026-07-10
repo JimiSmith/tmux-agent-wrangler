@@ -8,9 +8,12 @@ key="${key:-Tab}"
 
 tmux bind-key "$key" run-shell "$CURRENT_DIR/scripts/toggle.sh"
 
-# Keep the sidebar in view when the current window changes by any means
-# (select-window, next/previous, clicking the status line, etc.).
-tmux set-hook -g session-window-changed "run-shell '$CURRENT_DIR/scripts/follow.sh'"
+# Windows created while the sidebar is toggled on get their own sidebar pane.
+tmux set-hook -g after-new-window "run-shell '$CURRENT_DIR/scripts/spawn.sh --if-active'"
+tmux set-hook -g after-break-pane "run-shell '$CURRENT_DIR/scripts/spawn.sh --if-active'"
+
+# Unset the hook installed by older releases.
+tmux set-hook -gu session-window-changed
 
 # automatic-rename uses the active pane's command, so focusing the sidebar
 # briefly renames the window to "Python". Guard the format: while the sidebar

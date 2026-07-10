@@ -3,9 +3,13 @@
 
 Lists the session's windows with their panes as a tree, plus active agent
 sessions (Claude Code, Copilot CLI, ...) registered by scripts/agent-hook.sh,
-one section per agent. Windows and agent sessions are the interactive rows:
-Up/Down or j/k to move, Enter or a mouse click to focus. The sidebar moves
-itself into the target window before selecting it, so it stays visible.
+one section per agent. Windows, panes, and agent sessions are the interactive
+rows: Up/Down or j/k to move, Enter or a mouse click to focus.
+
+Every window has its own sidebar pane (spawned by scripts/spawn.sh), so
+switching windows never rearranges a layout. The instances share the current
+selection through a state file. A sidebar whose window has no real panes left
+exits, letting tmux close the window.
 """
 import curses
 import locale
@@ -13,11 +17,12 @@ import os
 import subprocess
 
 SIDEBAR_PANE = os.environ["TMUX_PANE"]
-REGISTRY = os.path.join(
+STATE_DIR = os.path.join(
     os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
     "tmux-agent-wrangler",
-    "sessions",
 )
+REGISTRY = os.path.join(STATE_DIR, "sessions")
+SELECTION_FILE = os.path.join(STATE_DIR, "selection")
 
 
 def tmux(*args):
@@ -40,17 +45,20 @@ def fetch_windows():
 
     by_id = {w["id"]: w for w in windows}
     pane_to_window = {}
+    sidebars = set()
     for line in tmux(
-        "list-panes", "-s", "-F", "#{window_id}\t#{pane_id}\t#{pane_index}\t#{pane_active}\t#{pane_current_command}"
+        "list-panes", "-s", "-F",
+        "#{window_id}\t#{pane_id}\t#{pane_index}\t#{pane_active}\t#{@wrangler_sidebar}\t#{pane_current_command}",
     ).splitlines():
-        wid, pid, index, active, cmd = line.split("\t", 4)
+        wid, pid, index, active, flag, cmd = line.split("\t", 5)
         if wid not in by_id:
             continue
         pane_to_window[pid] = by_id[wid]
-        if pid == SIDEBAR_PANE:
+        if flag == "1" or pid == SIDEBAR_PANE:
+            sidebars.add(pid)
             continue
         by_id[wid]["panes"].append({"id": pid, "index": index, "active": active == "1", "cmd": cmd})
-    return windows, pane_to_window
+    return windows, pane_to_window, sidebars
 
 
 def pid_alive(pid):
@@ -94,6 +102,24 @@ def fetch_agent_sessions(pane_to_window):
     return sessions
 
 
+def read_selection():
+    try:
+        with open(SELECTION_FILE) as f:
+            parts = f.read().rstrip("\n").split("\t")
+    except OSError:
+        return None
+    return tuple(parts) if parts and parts[0] else None
+
+
+def write_selection(key):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(SELECTION_FILE, "w") as f:
+            f.write("\t".join(key))
+    except OSError:
+        pass
+
+
 def build_rows(windows, sessions):
     """Flat list of (text, item) rows; item is a selectable dict, "header", or None."""
     rows = [(" WINDOWS", "header"), ("", None)]
@@ -133,20 +159,28 @@ def build_rows(windows, sessions):
     return rows
 
 
+def window_real_panes(win_id):
+    panes = []
+    for line in tmux("list-panes", "-t", win_id, "-F", "#{pane_id}\t#{@wrangler_sidebar}").splitlines():
+        pid, _, flag = line.partition("\t")
+        if flag != "1" and pid != SIDEBAR_PANE:
+            panes.append(pid)
+    return panes
+
+
 def focus(win_id, pane_id=None):
-    side_win = tmux("display-message", "-p", "-t", SIDEBAR_PANE, "#{window_id}").strip()
-    if side_win != win_id:
-        width = tmux("display-message", "-p", "-t", SIDEBAR_PANE, "#{pane_width}").strip() or "32"
-        tmux("join-pane", "-d", "-f", "-h", "-b", "-l", width, "-s", SIDEBAR_PANE, "-t", win_id)
-    tmux("select-window", "-t", win_id)
-    if pane_id:
-        tmux("select-pane", "-t", pane_id)
-        return
-    # Land focus on a real pane, not the sidebar.
-    if tmux("display-message", "-p", "-t", win_id, "#{pane_id}").strip() == SIDEBAR_PANE:
-        others = [p for p in tmux("list-panes", "-t", win_id, "-F", "#{pane_id}").split() if p != SIDEBAR_PANE]
-        if others:
-            tmux("select-pane", "-t", others[0])
+    target_pane = pane_id
+    if not target_pane:
+        # Land focus on a real pane, not a sidebar.
+        line = tmux("display-message", "-p", "-t", win_id, "#{pane_id}\t#{@wrangler_sidebar}").strip()
+        active, _, flag = line.partition("\t")
+        if flag == "1" or active == SIDEBAR_PANE:
+            real = window_real_panes(win_id)
+            target_pane = real[0] if real else None
+    cmds = ["select-window", "-t", win_id]
+    if target_pane:
+        cmds += [";", "select-pane", "-t", target_pane]
+    tmux(*cmds)
 
 
 def activate(item):
@@ -205,19 +239,23 @@ def main(stdscr):
     floor = min_width()
 
     while True:
-        windows, pane_to_window = fetch_windows()
+        windows, pane_to_window, sidebars = fetch_windows()
         if not windows:
             return
-        # If the sidebar is the only pane left in its window, move on to the
-        # next window rather than sitting there full-width. Leaving makes
-        # tmux destroy the emptied window.
         me = pane_to_window.get(SIDEBAR_PANE)
-        if me and not me["panes"]:
-            nxt = windows[(windows.index(me) + 1) % len(windows)]
-            if nxt is me:
+        if me is None:
+            return
+        # Exit if a lower-numbered sidebar occupies this window (spawn race),
+        # or if no real panes remain here (tmux then closes the window).
+        for p in sidebars:
+            if p != SIDEBAR_PANE and pane_to_window.get(p) is me and int(p[1:]) < int(SIDEBAR_PANE[1:]):
                 return
-            focus(nxt["id"])
-            continue
+        if not me["panes"]:
+            return
+
+        shared = read_selection()
+        if shared:
+            selected_key = shared
         sessions = fetch_agent_sessions(pane_to_window)
         rows = build_rows(windows, sessions)
         items = [item for _, item in rows if isinstance(item, dict)]
@@ -234,11 +272,16 @@ def main(stdscr):
                 tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(floor))
             continue
         if ch in (ord("q"), ord("Q")):
+            # Close every sidebar, not just this one. The server must run the
+            # toggle: a child of this pane would be killed along with it.
+            tmux("run-shell", "-b", os.path.join(os.path.dirname(os.path.abspath(__file__)), "toggle.sh"))
             return
         if ch in (curses.KEY_UP, ord("k")):
             selected_key = keys[max(0, keys.index(selected_key) - 1)]
+            write_selection(selected_key)
         elif ch in (curses.KEY_DOWN, ord("j")):
             selected_key = keys[min(len(keys) - 1, keys.index(selected_key) + 1)]
+            write_selection(selected_key)
         elif ch in (curses.KEY_ENTER, 10, 13):
             activate(items[keys.index(selected_key)])
         elif ch == curses.KEY_MOUSE:
@@ -251,6 +294,7 @@ def main(stdscr):
             row_idx = my + offset
             if 0 <= row_idx < len(rows) and isinstance(rows[row_idx][1], dict):
                 selected_key = rows[row_idx][1]["key"]
+                write_selection(selected_key)
                 activate(rows[row_idx][1])
 
 
