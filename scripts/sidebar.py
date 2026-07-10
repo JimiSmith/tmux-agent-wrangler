@@ -74,16 +74,16 @@ def fetch_windows():
     sidebars = set()
     for line in tmux(
         "list-panes", "-s", "-F",
-        "#{window_id}\t#{pane_id}\t#{pane_index}\t#{pane_active}\t#{@wrangler_sidebar}\t#{pane_current_command}",
+        "#{window_id}\t#{pane_id}\t#{pane_index}\t#{pane_active}\t#{@wrangler_sidebar}\t#{pane_title}",
     ).splitlines():
-        wid, pid, index, active, flag, cmd = line.split("\t", 5)
+        wid, pid, index, active, flag, title = line.split("\t", 5)
         if wid not in by_id:
             continue
         pane_to_window[pid] = by_id[wid]
         if flag == "1" or pid == SIDEBAR_PANE:
             sidebars.add(pid)
             continue
-        by_id[wid]["panes"].append({"id": pid, "index": index, "active": active == "1", "cmd": cmd})
+        by_id[wid]["panes"].append({"id": pid, "index": index, "active": active == "1", "title": title})
     return windows, pane_to_window, sidebars
 
 
@@ -178,7 +178,7 @@ def build_rows(windows, sessions):
             branch = "└─" if i == last else "├─"
             active = "*" if p["active"] else " "
             rows.append(
-                (f"   {branch}{active}{p['index']}: {p['cmd']}",
+                (f"   {branch}{active}{p['index']}: {p['title']}",
                  {"kind": "pane", "key": ("p", p["id"]), "win": w, "pane": p["id"]})
             )
     for agent in sorted({s["agent"] for s in sessions}):
