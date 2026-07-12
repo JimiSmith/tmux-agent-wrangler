@@ -53,7 +53,9 @@ independent instances behaving as one.
 
 - **`scripts/focus.sh`** — bound to the focus key. Selects the current window's
   sidebar pane (found via the `@wrangler_sidebar` option); a no-op if the window
-  has no sidebar, so it never spawns one.
+  has no sidebar, so it never spawns one. After selecting, it sends `C-l` to the
+  sidebar to force an immediate repaint — the guaranteed path when a terminal or
+  config leaves `focus-events` off and the mode-1004 report never arrives.
 
 - **`scripts/toggle.sh`** — the on/off switch. If any sidebar pane exists, kills
   all of them; otherwise clears the shared width and spawns one sidebar per
@@ -70,6 +72,15 @@ independent instances behaving as one.
   - **Self-exit conditions** (so tmux can close windows / avoid duplicate
     sidebars): exits if its window has no real panes left, or if a
     lower-numbered sidebar pane also occupies its window (a spawn race).
+  - **Focus reporting** (mode 1004): enables `ESC[?1004h` on start (disables it
+    on exit) and treats the `ESC[I` / `ESC[O` reports as a redraw so the
+    focus-only selection highlight appears/clears the instant focus changes,
+    not on the next poll. `getch()` returns the `ESC` and the trailing `[I`/`[O`
+    is drained non-blocking; `set_escdelay(25)` bounds the lone-ESC wait. tmux
+    only delivers these reports when the user has set `focus-events on` (the
+    plugin does not set it); without it the highlight just falls back to the
+    poll. `focus.sh`'s `C-l` nudge is the fallback that always covers the focus
+    key.
   - **Shared selection**: the highlighted row is written to / read from the
     `selection` file every tick, so all sidebars highlight the same logical
     row and Enter/click on any of them focuses the same target.

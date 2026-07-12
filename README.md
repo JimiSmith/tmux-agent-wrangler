@@ -227,3 +227,14 @@ set -g @wrangler-min-width 24  # sidebar snaps back if squeezed below this
 set -g @wrangler-sync-width on # resizing one sidebar resizes them all ('off' to disable)
 set -g @wrangler-auto-install-hooks off # install agent hooks on plugin load ('on' to enable)
 ```
+
+For the selection highlight to follow focus the moment it changes rather than
+on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:
+
+```tmux
+set -g focus-events on
+```
+
+The plugin does not set this for you, since it is a server-wide option. Without
+it the highlight still updates on the next poll, and focusing via the focus key
+(`prefix + a`) is instant regardless.
