@@ -95,6 +95,18 @@ independent instances behaving as one.
   the turn ends). `sidebar.py` prunes any registry entry (and both markers)
   whose pane is gone or whose PID is dead.
 
+- **`scripts/install-hooks.py`** — installs (or `--uninstall`s) the
+  `agent-hook.sh` invocations into each agent's config so users need not hand-edit
+  them. It renders `scripts/hooks-manifest.json` — the declarative per-agent list
+  of `event -> [action]` mappings — wiring the absolute path to this repo's
+  `agent-hook.sh`. Two `format`s: `claude` merges non-destructively into the
+  shared `~/.claude/settings.json` (replacing only wrangler's own hook groups,
+  keyed on the `agent-hook.sh` command, preserving mode and a `.wrangler.bak`
+  backup); `copilot` writes the dedicated `~/.copilot/hooks/wrangler.json` it
+  owns outright. Idempotent. `wrangler.tmux` runs it on load when
+  `@wrangler-auto-install-hooks` is on. Adding an agent event is one line in the
+  manifest; a new agent whose config differs needs a new `format` handler.
+
 ## Conventions
 
 - The `@wrangler_sidebar` pane option marks sidebar panes; check it (never the

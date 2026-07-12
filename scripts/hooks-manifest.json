@@ -1,0 +1,28 @@
+{
+  "claude": {
+    "target": "~/.claude/settings.json",
+    "format": "claude",
+    "events": {
+      "SessionStart": ["start"],
+      "SessionEnd": ["end"],
+      "UserPromptSubmit": ["working"],
+      "Stop": ["needsAttention"],
+      "StopFailure": ["needsAttention"],
+      "Notification": ["needsAttention"],
+      "PermissionRequest": ["needsAttention"]
+    }
+  },
+  "copilot": {
+    "target": "~/.copilot/hooks/wrangler.json",
+    "format": "copilot",
+    "events": {
+      "sessionStart": ["start", "working"],
+      "userPromptSubmitted": ["working"],
+      "agentStop": ["needsAttention"],
+      "errorOccurred": ["needsAttention"],
+      "notification": ["needsAttention"],
+      "permissionRequest": ["needsAttention"],
+      "sessionEnd": ["needsAttention"]
+    }
+  }
+}

@@ -88,6 +88,26 @@ Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
 The start hook records the pane, cwd, and the agent's PID; the sidebar prunes
 an entry when its pane disappears or its process exits.
 
+### Automatic install
+
+Rather than editing the config files by hand (below), run the installer, which
+wires the hooks for both agents using this plugin's own path:
+
+```sh
+scripts/install-hooks.py            # both agents
+scripts/install-hooks.py claude     # or one: claude | copilot
+scripts/install-hooks.py --uninstall
+```
+
+It merges into Claude Code's shared `~/.claude/settings.json` without touching
+your other hooks (backing it up to `settings.json.wrangler.bak` first) and
+writes Copilot's dedicated `~/.copilot/hooks/wrangler.json`. It is idempotent,
+so re-running is safe. The hook set it installs lives in
+`scripts/hooks-manifest.json`. To run it automatically on plugin load, set
+`@wrangler-auto-install-hooks on` (see Options).
+
+To wire the hooks manually instead, use the per-agent blocks below.
+
 The examples below assume the default TPM install path,
 `~/.tmux/plugins/tmux-agent-wrangler`. To confirm where TPM put the plugin,
 run `tmux show-environment -g TMUX_PLUGIN_MANAGER_PATH` — the plugin lives in
@@ -181,4 +201,5 @@ set -g @wrangler-key 'Tab'   # toggle key (bound with prefix)
 set -g @wrangler-width 32      # sidebar width in columns
 set -g @wrangler-min-width 24  # sidebar snaps back if squeezed below this
 set -g @wrangler-sync-width on # resizing one sidebar resizes them all ('off' to disable)
+set -g @wrangler-auto-install-hooks off # install agent hooks on plugin load ('on' to enable)
 ```

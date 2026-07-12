@@ -8,6 +8,13 @@ key="${key:-Tab}"
 
 tmux bind-key "$key" run-shell "$CURRENT_DIR/scripts/toggle.sh"
 
+# Opt-in: install the agent hooks into Claude/Copilot config on load. Off by
+# default; backgrounded so load never blocks on config writes, and idempotent
+# so firing every load is harmless.
+case "$(tmux show-option -gqv @wrangler-auto-install-hooks)" in
+  on|1|yes|true) tmux run-shell -b "$CURRENT_DIR/scripts/install-hooks.py" ;;
+esac
+
 # Windows created while the sidebar is toggled on get their own sidebar pane.
 tmux set-hook -g after-new-window "run-shell '$CURRENT_DIR/scripts/spawn.sh --if-active'"
 tmux set-hook -g after-break-pane "run-shell '$CURRENT_DIR/scripts/spawn.sh --if-active'"
