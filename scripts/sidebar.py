@@ -291,12 +291,17 @@ def draw(stdscr, rows, selected_key, offset, has_focus):
     return offset
 
 
-# DEC private mode 1004: with it enabled the terminal sends ESC[I on focus-in
-# and ESC[O on focus-out, letting the sidebar repaint the selection highlight
-# the instant it gains or loses focus instead of on its next 1s poll. tmux only
-# forwards these to the pane when its focus-events option is on, so the payoff
+# DEC private mode 1004: with it enabled the terminal sends a focus report
+# (ESC[I on focus-in, ESC[O on focus-out) when this pane gains or loses focus.
+# We do not decode it - curses hands it back as an unrecognised key code, which
+# is enough to wake the blocking getch() so the loop redraws and the selection
+# highlight tracks the focus change at once instead of on the next 1s poll.
+# tmux only sends these when its focus-events option is on, so the payoff
 # depends on the user setting `focus-events on`; without it the sidebar falls
-# back to the poll (and focus.sh's nudge still covers the focus key).
+# back to the poll (and focus.sh's nudge still covers the focus key). We must
+# not intercept a raw ESC ourselves: an arrow key that arrives just after a
+# focus report can fragment into a bare ESC + '[' + letter, and swallowing it
+# would eat the keypress.
 FOCUS_ON = b"\x1b[?1004h"
 FOCUS_OFF = b"\x1b[?1004l"
 
@@ -309,22 +314,6 @@ def set_focus_reporting(enabled):
         pass
 
 
-def drain_focus_report(stdscr):
-    """Consume the '[I' / '[O' that trails a focus-report ESC from getch().
-
-    Read non-blocking so a bare ESC keypress cannot stall the loop. The bytes
-    are discarded: any ESC just falls through to a redraw, which repaints the
-    highlight for the new focus state; draining only stops the trailing bytes
-    being read as stray input on the next tick.
-    """
-    stdscr.timeout(0)
-    try:
-        if stdscr.getch() == ord("["):
-            stdscr.getch()
-    finally:
-        stdscr.timeout(1000)
-
-
 def main(stdscr):
     curses.curs_set(0)
     curses.use_default_colors()
@@ -335,10 +324,6 @@ def main(stdscr):
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
     curses.mouseinterval(0)
     stdscr.timeout(1000)
-    # A focus report split across reads would otherwise leave its leading ESC
-    # waiting the full default escape delay before getch() returns it; 25ms
-    # bounds that so the highlight still repaints promptly.
-    curses.set_escdelay(25)
 
     # Report focus changes while running and stop on exit.
     set_focus_reporting(True)
@@ -432,9 +417,6 @@ def main(stdscr):
 
         ch = stdscr.getch()
         if ch == curses.KEY_RESIZE:
-            continue
-        if ch == 27:  # focus report (ESC[I / ESC[O) or a bare ESC: just redraw
-            drain_focus_report(stdscr)
             continue
         if ch in (ord("q"), ord("Q")):
             # Close every sidebar, not just this one. The server must run the

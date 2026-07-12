@@ -72,14 +72,17 @@ independent instances behaving as one.
   - **Self-exit conditions** (so tmux can close windows / avoid duplicate
     sidebars): exits if its window has no real panes left, or if a
     lower-numbered sidebar pane also occupies its window (a spawn race).
-  - **Focus reporting** (mode 1004): enables `ESC[?1004h` on start (disables it
-    on exit) and treats the `ESC[I` / `ESC[O` reports as a redraw so the
-    focus-only selection highlight appears/clears the instant focus changes,
-    not on the next poll. `getch()` returns the `ESC` and the trailing `[I`/`[O`
-    is drained non-blocking; `set_escdelay(25)` bounds the lone-ESC wait. tmux
-    only delivers these reports when the user has set `focus-events on` (the
-    plugin does not set it); without it the highlight just falls back to the
-    poll. `focus.sh`'s `C-l` nudge is the fallback that always covers the focus
+  - **Focus reporting** (mode 1004): enables `ESC[?1004h` on start and disables
+    it on exit. The terminal's `ESC[I` / `ESC[O` focus reports arrive as an
+    unrecognised key code (curses assembles them into one code, or they fall
+    through as raw bytes); either way they wake the blocking `getch()`, so the
+    loop redraws and the focus-only selection highlight appears/clears the
+    instant focus changes rather than on the next poll. It deliberately does
+    *not* special-case a raw `ESC`: an arrow key arriving right after a focus
+    report can fragment into a bare `ESC` + `[` + letter, and swallowing it
+    would eat the keypress. tmux only delivers these reports when the user has
+    set `focus-events on` (the plugin does not set it); without it the highlight
+    falls back to the poll, and `focus.sh`'s `C-l` nudge always covers the focus
     key.
   - **Shared selection**: the highlighted row is written to / read from the
     `selection` file every tick, so all sidebars highlight the same logical
