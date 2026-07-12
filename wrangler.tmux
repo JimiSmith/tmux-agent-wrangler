@@ -8,6 +8,11 @@ key="${key:-Tab}"
 
 tmux bind-key "$key" run-shell "$CURRENT_DIR/scripts/toggle.sh"
 
+focus_key="$(tmux show-option -gqv @wrangler-focus-key)"
+focus_key="${focus_key:-a}"
+
+tmux bind-key "$focus_key" run-shell "$CURRENT_DIR/scripts/focus.sh"
+
 # Opt-in: install the agent hooks into Claude/Copilot config on load. Off by
 # default; backgrounded so load never blocks on config writes, and idempotent
 # so firing every load is harmless.

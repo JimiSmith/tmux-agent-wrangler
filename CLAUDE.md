@@ -45,10 +45,15 @@ only through files in the state dir, so most complexity is about keeping those
 independent instances behaving as one.
 
 - **`wrangler.tmux`** — TPM entry point. Binds the toggle key (`@wrangler-key`,
-  default `Tab`, bound with prefix) and installs `after-new-window` /
+  default `Tab`, bound with prefix) and the focus key (`@wrangler-focus-key`,
+  default `a`, bound with prefix) and installs `after-new-window` /
   `after-break-pane` hooks so windows created while the sidebar is on get their
   own sidebar. Also patches `automatic-rename-format` so focusing the sidebar
   pane (command `Python`) does not rename the window.
+
+- **`scripts/focus.sh`** — bound to the focus key. Selects the current window's
+  sidebar pane (found via the `@wrangler_sidebar` option); a no-op if the window
+  has no sidebar, so it never spawns one.
 
 - **`scripts/toggle.sh`** — the on/off switch. If any sidebar pane exists, kills
   all of them; otherwise clears the shared width and spawns one sidebar per

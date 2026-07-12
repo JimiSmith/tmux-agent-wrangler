@@ -54,6 +54,7 @@ run-shell /path/to/tmux-agent-wrangler/wrangler.tmux
 ## Usage
 
 - `prefix + Tab` — toggle the sidebar
+- `prefix + a` — focus this window's sidebar (no-op if the sidebar is off)
 - `Up`/`Down` or `k`/`j` — move the highlight between windows
 - `Enter` — focus the highlighted window
 - mouse click on a window line — focus it
@@ -220,6 +221,7 @@ Copilot CLI fires its lifecycle hooks per prompt-cycle rather than per session
 
 ```tmux
 set -g @wrangler-key 'Tab'   # toggle key (bound with prefix)
+set -g @wrangler-focus-key 'a' # focus this window's sidebar (bound with prefix)
 set -g @wrangler-width 32      # sidebar width in columns
 set -g @wrangler-min-width 24  # sidebar snaps back if squeezed below this
 set -g @wrangler-sync-width on # resizing one sidebar resizes them all ('off' to disable)
