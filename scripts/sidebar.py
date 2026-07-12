@@ -73,6 +73,7 @@ def fetch_windows():
     pane_to_window = {}
     pane_paths = {}
     sidebars = set()
+    sidebar_active = False
     # pane_current_path sits before pane_title so the free-form title stays the
     # trailing field; a path is very unlikely to contain a tab.
     for line in tmux(
@@ -86,9 +87,11 @@ def fetch_windows():
         pane_paths[pid] = path
         if flag == "1" or pid == SIDEBAR_PANE:
             sidebars.add(pid)
+            if pid == SIDEBAR_PANE:
+                sidebar_active = active == "1"
             continue
         by_id[wid]["panes"].append({"id": pid, "index": index, "active": active == "1", "title": title})
-    return windows, pane_to_window, sidebars, pane_paths
+    return windows, pane_to_window, sidebars, pane_paths, sidebar_active
 
 
 def pid_alive(pid):
@@ -245,7 +248,7 @@ def activate(item):
     focus(item["win"]["id"], item.get("pane"))
 
 
-def draw(stdscr, rows, selected_key, offset):
+def draw(stdscr, rows, selected_key, offset, has_focus):
     height, width = stdscr.getmaxyx()
     sel_row = next(
         (i for i, (_, item) in enumerate(rows) if isinstance(item, dict) and item["key"] == selected_key), 0
@@ -274,7 +277,7 @@ def draw(stdscr, rows, selected_key, offset):
                     attr = curses.color_pair(2) | curses.A_BOLD
             else:
                 attr = curses.A_DIM
-            if item["key"] == selected_key:
+            if has_focus and item["key"] == selected_key:
                 attr |= curses.A_REVERSE
         else:
             attr = curses.A_DIM
@@ -307,12 +310,16 @@ def main(stdscr):
     relayout_grace = 0
 
     while True:
-        windows, pane_to_window, sidebars, pane_paths = fetch_windows()
+        windows, pane_to_window, sidebars, pane_paths, sidebar_active = fetch_windows()
         if not windows:
             return
         me = pane_to_window.get(SIDEBAR_PANE)
         if me is None:
             return
+        # Only the focused sidebar (active pane of the active window) shows the
+        # keyboard-selection bar; the shared selection is otherwise painted on
+        # every window's sidebar at once, which misreads as a live cursor.
+        has_focus = me["active"] and sidebar_active
         # Exit if a lower-numbered sidebar occupies this window (spawn race),
         # or if no real panes remain here (tmux then closes the window).
         for p in sidebars:
@@ -377,7 +384,7 @@ def main(stdscr):
             selected_key = next(
                 (item["key"] for item in items if item["kind"] == "window" and item["win"]["active"]), keys[0]
             )
-        offset = draw(stdscr, rows, selected_key, offset)
+        offset = draw(stdscr, rows, selected_key, offset, has_focus)
 
         ch = stdscr.getch()
         if ch == curses.KEY_RESIZE:
