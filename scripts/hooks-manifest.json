@@ -6,10 +6,18 @@
       "SessionStart": ["start"],
       "SessionEnd": ["end"],
       "UserPromptSubmit": ["working"],
+      "PostToolUse": ["working"],
+      "PostToolUseFailure": ["working"],
+      "PostToolBatch": ["working"],
+      "SubagentStart": ["working"],
+      "PreToolUse": [{ "matcher": "AskUserQuestion|ExitPlanMode", "actions": ["needsAttention"] }],
       "Stop": ["needsAttention"],
       "StopFailure": ["needsAttention"],
-      "Notification": ["needsAttention"],
-      "PermissionRequest": ["needsAttention"]
+      "PermissionRequest": ["needsAttention"],
+      "Notification": [
+        { "matcher": "idle_prompt", "actions": ["needsAttention"] },
+        { "matcher": "elicitation_dialog", "actions": ["needsAttention"] }
+      ]
     }
   },
   "copilot": {

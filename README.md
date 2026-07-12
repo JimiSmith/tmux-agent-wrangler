@@ -116,7 +116,13 @@ use the directory you cloned instead.
 
 ### Claude Code
 
-Register the hooks in `~/.claude/settings.json`:
+Register the hooks in `~/.claude/settings.json`. `working` is wired on every
+event that (re)starts activity — a fresh prompt, any tool result, a subagent
+spawn — so the indicator recovers whenever Claude resumes on its own.
+`needsAttention` is wired on every event that hands control back to you,
+including a `PreToolUse` matcher for the interactive `AskUserQuestion` /
+`ExitPlanMode` tools (which fire no notification of their own) and the
+attention-worthy `Notification` types:
 
 ```json
 {
@@ -130,17 +136,33 @@ Register the hooks in `~/.claude/settings.json`:
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
     ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
+    ],
+    "PostToolUseFailure": [
+      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
+    ],
+    "PostToolBatch": [
+      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
+    ],
+    "SubagentStart": [
+      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "AskUserQuestion|ExitPlanMode", "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
+    ],
     "Stop": [
       { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
     ],
     "StopFailure": [
       { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
     ],
-    "Notification": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
-    ],
     "PermissionRequest": [
       { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
+    ],
+    "Notification": [
+      { "matcher": "idle_prompt", "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] },
+      { "matcher": "elicitation_dialog", "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
     ]
   }
 }

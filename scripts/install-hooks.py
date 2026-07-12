@@ -39,6 +39,19 @@ def command(agent, action):
     return f"{shlex.quote(HOOK)} {agent} {action}"
 
 
+def groups(value):
+    """Normalise a manifest event value into [(matcher_or_None, actions), ...].
+
+    Two forms are accepted: a list of action strings (one group, no matcher) or
+    a list of {"matcher": ..., "actions": [...]} objects (one group each, the
+    matcher optional). Matchers only apply to the Claude config; the Copilot
+    renderer flattens the actions and ignores them.
+    """
+    if value and isinstance(value[0], dict):
+        return [(g.get("matcher"), g["actions"]) for g in value]
+    return [(None, value)]
+
+
 def is_wrangler_command(cmd, agent):
     """Whether a hook command belongs to this agent's wrangler hooks.
 
@@ -87,8 +100,8 @@ def install_claude(agent, spec, uninstall):
     if not isinstance(hooks, dict):
         hooks = {}
 
-    for event, actions in spec["events"].items():
-        groups = [
+    for event, value in spec["events"].items():
+        kept = [
             g for g in hooks.get(event, [])
             if not any(
                 is_wrangler_command(h.get("command", ""), agent)
@@ -96,14 +109,18 @@ def install_claude(agent, spec, uninstall):
             )
         ]
         if not uninstall:
-            groups.append({
-                "hooks": [
-                    {"type": "command", "command": command(agent, action)}
-                    for action in actions
-                ]
-            })
-        if groups:
-            hooks[event] = groups
+            for matcher, actions in groups(value):
+                group = {
+                    "hooks": [
+                        {"type": "command", "command": command(agent, action)}
+                        for action in actions
+                    ]
+                }
+                if matcher is not None:
+                    group = {"matcher": matcher, **group}
+                kept.append(group)
+        if kept:
+            hooks[event] = kept
         else:
             hooks.pop(event, None)
 
@@ -138,9 +155,10 @@ def install_copilot(agent, spec, uninstall):
         "hooks": {
             event: [
                 {"type": "command", "bash": command(agent, action)}
+                for _, actions in groups(value)
                 for action in actions
             ]
-            for event, actions in spec["events"].items()
+            for event, value in spec["events"].items()
         },
     }
     mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o644

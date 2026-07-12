@@ -86,9 +86,13 @@ independent instances behaving as one.
   process dies. This PID-pruning exists because not every agent fires a reliable
   `end` event (Copilot CLI fires hooks per prompt-cycle, so its `sessionEnd`
   maps to `needsAttention`, not `end` — see README). `working` (Claude Code's
-  `UserPromptSubmit`; Copilot's per-cycle `sessionStart`) and `needsAttention`
-  (Claude Code's `Stop` / `Notification`; Copilot's `sessionEnd`) each write
-  their marker and delete the other's, so the two are mutually exclusive; both
+  `UserPromptSubmit` plus the resume signals `PostToolUse` / `PostToolUseFailure`
+  / `PostToolBatch` / `SubagentStart`; Copilot's per-cycle `sessionStart`) and
+  `needsAttention` (Claude Code's `Stop` / `StopFailure` / `PermissionRequest`,
+  the `idle_prompt` and `elicitation_dialog` `Notification` types, and a
+  `PreToolUse` matcher for the `AskUserQuestion` / `ExitPlanMode` interactive
+  tools; Copilot's `sessionEnd`) each write their marker and delete the other's,
+  so the two are mutually exclusive; both
   only mark an already-registered session, so stray events leave no orphan. The
   sidebar renders `◐` for working and `●` for attention, and deletes the
   attention marker once its pane is focused (the working marker persists until
@@ -99,7 +103,10 @@ independent instances behaving as one.
   `agent-hook.sh` invocations into each agent's config so users need not hand-edit
   them. It renders `scripts/hooks-manifest.json` — the declarative per-agent list
   of `event -> [action]` mappings — wiring the absolute path to this repo's
-  `agent-hook.sh`. Two `format`s: `claude` merges non-destructively into the
+  `agent-hook.sh`. An event value is either a list of action strings (one hook
+  group, no matcher) or a list of `{matcher, actions}` objects (one group each);
+  matchers are Claude-only (the `claude` format emits them; the `copilot` format
+  flattens the actions and drops the matcher). Two `format`s: `claude` merges non-destructively into the
   shared `~/.claude/settings.json` (replacing only wrangler's own hook groups,
   keyed on the `agent-hook.sh` command, preserving mode and a `.wrangler.bak`
   backup); `copilot` writes the dedicated `~/.copilot/hooks/wrangler.json` it
