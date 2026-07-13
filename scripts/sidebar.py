@@ -53,20 +53,24 @@ def label_mode():
     return "dir" if value == "dir" else "name"
 
 
-# transcript_path -> (mtime, title). Holds the last title seen for the session,
-# so the render loop only re-reads when the file changes and a scan that misses
-# the title falls back to the previous one rather than regressing.
+# transcript_path -> (mtime, title, custom). Holds the last title resolved for
+# the session so the render loop only re-reads when the file changes; `custom`
+# marks a title that came from a manual /rename, which is sticky (see
+# session_title). A scan that finds nothing keeps the cached title rather than
+# regressing.
 _title_cache = {}
 
-# Scan only the transcript's tail: the latest ai-title sits within a few KB of
-# EOF in practice (Claude rewrites it roughly every turn), so this stays cheap
+# Scan only the transcript's tail: the title records sit within a few KB of EOF
+# in practice (Claude rewrites them roughly every turn), so this stays cheap
 # regardless of how large the transcript grows.
 _TITLE_TAIL_BYTES = 65536
 
 
-def _scan_tail_for_title(transcript_path):
-    """Last 'ai-title' value in the file's trailing chunk, or "" if none found
-    there / unreadable. Reads only the final _TITLE_TAIL_BYTES bytes."""
+def _scan_tail_for_titles(transcript_path):
+    """Last manual and auto titles in the file's trailing chunk, as
+    (custom, ai); each "" if not found there / unreadable. `custom` is a
+    /rename ('custom-title'), `ai` the auto-generated one ('ai-title'). Reads
+    only the final _TITLE_TAIL_BYTES bytes."""
     try:
         with open(transcript_path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -74,34 +78,42 @@ def _scan_tail_for_title(transcript_path):
             f.seek(max(0, size - _TITLE_TAIL_BYTES))
             chunk = f.read()
     except OSError:
-        return ""
+        return "", ""
     lines = chunk.split(b"\n")
     if size > _TITLE_TAIL_BYTES:
         del lines[0]  # first line is likely truncated mid-record
-    title = ""
-    for line in lines:
-        if b'"ai-title"' not in line:
-            continue
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        if rec.get("type") == "ai-title" and rec.get("aiTitle"):
-            title = rec["aiTitle"]  # keep scanning; the last one wins
-    return title
+    custom = ai = ""
+    for line in lines:  # keep scanning; the last of each kind wins
+        if b'"custom-title"' in line:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("type") == "custom-title" and rec.get("customTitle"):
+                custom = rec["customTitle"]
+        elif b'"ai-title"' in line:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("type") == "ai-title" and rec.get("aiTitle"):
+                ai = rec["aiTitle"]
+    return custom, ai
 
 
 def session_title(transcript_path):
-    """Current 'ai-title' for a Claude session, or "" if none/unavailable.
+    """Current display name for a Claude session, or "" if none/unavailable.
 
-    Claude Code appends `{"type":"ai-title","aiTitle":...}` records as it
-    (re)titles a session; the last one wins. Empty transcript_path (Copilot, a
-    legacy record, or a just-started session with no title yet) yields "".
+    Claude records two kinds of title: an auto-generated 'ai-title' (rewritten
+    roughly every turn) and, when the user runs /rename, a 'custom-title'. A
+    manual rename wins and is sticky: once seen it keeps overriding the auto
+    title, which Claude goes on emitting regardless. Empty transcript_path
+    (Copilot, a legacy record, or a just-started session with no title yet)
+    yields "".
 
-    A tail scan that comes up empty keeps the last title seen: a long burst of
-    transcript output can briefly push the title out of the scanned window, but
-    since we rescan every changed tick we captured it while it was recent, and a
-    title is only ever rewritten to a new value, never blanked."""
+    A scan that comes up empty keeps the last title seen: a long burst of output
+    can briefly push the titles out of the scanned tail, but we rescan every
+    changed tick, so we captured them while recent."""
     if not transcript_path:
         return ""
     try:
@@ -111,9 +123,18 @@ def session_title(transcript_path):
     cached = _title_cache.get(transcript_path)
     if cached and cached[0] == mtime:
         return cached[1]
-    prev = cached[1] if cached else ""
-    title = _scan_tail_for_title(transcript_path) or prev
-    _title_cache[transcript_path] = (mtime, title)
+    prev_title = cached[1] if cached else ""
+    prev_custom = cached[2] if cached else False
+    custom, ai = _scan_tail_for_titles(transcript_path)
+    if custom:
+        title, is_custom = custom, True
+    elif prev_custom:
+        title, is_custom = prev_title, True  # keep the manual name
+    elif ai:
+        title, is_custom = ai, False
+    else:
+        title, is_custom = prev_title, prev_custom
+    _title_cache[transcript_path] = (mtime, title, is_custom)
     return title
 
 
