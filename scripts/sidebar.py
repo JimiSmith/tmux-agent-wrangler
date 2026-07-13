@@ -376,8 +376,11 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
         attn_marker = os.path.join(ATTENTION, name)
         work_marker = os.path.join(WORKING, name)
         try:
+            # rstrip only the newline, not tabs: the pane field (field 1) may be
+            # empty for a pane-less session, and .strip() would eat that leading
+            # tab and shift every field left.
             with open(path) as f:
-                fields = f.read().strip().split("\t")
+                fields = f.read().rstrip("\n").split("\t")
         except OSError:
             continue
         if len(fields) == 2:  # legacy claude-hook.sh format: pane, cwd
@@ -387,8 +390,16 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
             transcript = fields[4] if len(fields) >= 5 else ""
         else:
             continue
-        window = pane_to_window.get(pane)
-        if window is None or (pid.isdigit() and not pid_alive(int(pid))):
+        # A recorded pane is optional: a pane-less session (no TMUX_PANE at hook
+        # time, e.g. a daemon-hosted Claude Code session) maps to no window and
+        # is shown under the "Agents" group instead. Its liveness is tracked by
+        # PID alone. A session that *did* name a pane which no longer exists is
+        # stale, but only prune it on that basis when we have no live PID to
+        # consult (legacy 2-field records, or a failed PID capture).
+        window = pane_to_window.get(pane) if pane else None
+        pid_dead = pid.isdigit() and not pid_alive(int(pid))
+        pane_gone = bool(pane) and window is None
+        if pid_dead or (pane_gone and not pid.isdigit()):
             for stale in (path, attn_marker, work_marker):
                 try:
                     os.unlink(stale)
@@ -444,6 +455,26 @@ def write_selection(key):
         pass
 
 
+def _append_agent_rows(rows, group, win):
+    """Append the tree rows for one group of agent sessions under a heading.
+
+    `win` is the window the group is filed under, or None for the pane-less
+    "Agents" group; it rides on each row so activate() can focus the pane (a
+    None win is a no-op there, since a detached session has no pane to jump to).
+    """
+    last = len(group) - 1
+    for i, s in enumerate(group):
+        branch = "└─" if i == last else "├─"
+        # The glyph rides on the item, not the text: draw() pins it to the
+        # right edge so it survives a long title being truncated.
+        rows.append(
+            (f"   {branch} {s['label']}",
+             {"kind": "agent", "key": ("a", s["id"]), "win": win, "pane": s["pane"],
+              "status": s["status"], "color": s["color"],
+              "glyph": {"attention": "●", "working": "◐"}.get(s["status"], "")})
+        )
+
+
 def build_rows(windows, sessions):
     """Flat list of (text, item) rows; item is a selectable dict, "header", or None."""
     rows = [(" WINDOWS", "header"), ("", None)]
@@ -463,6 +494,7 @@ def build_rows(windows, sessions):
         rows.append((f" {agent.upper()}", "header"))
         rows.append(("", None))
         agent_sessions = [s for s in sessions if s["agent"] == agent]
+        # Sessions that have a pane group under that pane's window.
         for w in windows:
             group = [s for s in agent_sessions if s["window"] is w]
             if not group:
@@ -472,18 +504,12 @@ def build_rows(windows, sessions):
                 (f"{marker} {w['index']}: {w['name']}",
                  {"kind": "window", "key": ("w", agent, w["id"]), "win": w})
             )
-            last = len(group) - 1
-            for i, s in enumerate(group):
-                branch = "└─" if i == last else "├─"
-                name = s["label"]
-                # The glyph rides on the item, not the text: draw() pins it to
-                # the right edge so it survives a long title being truncated.
-                rows.append(
-                    (f"   {branch} {name}",
-                     {"kind": "agent", "key": ("a", s["id"]), "win": w, "pane": s["pane"],
-                      "status": s["status"], "color": s["color"],
-                      "glyph": {"attention": "●", "working": "◐"}.get(s["status"], "")})
-                )
+            _append_agent_rows(rows, group, w)
+        # Pane-less sessions collect under a non-selectable "Agents" heading.
+        detached = [s for s in agent_sessions if s["window"] is None]
+        if detached:
+            rows.append(("  Agents", None))
+            _append_agent_rows(rows, detached, None)
     return rows
 
 
@@ -512,7 +538,10 @@ def focus(win_id, pane_id=None):
 
 
 def activate(item):
-    focus(item["win"]["id"], item.get("pane"))
+    win = item.get("win")
+    if win is None:
+        return  # detached agent session: no pane to focus
+    focus(win["id"], item.get("pane"))
 
 
 def _fit(text, field):

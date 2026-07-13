@@ -48,10 +48,13 @@ ring_bell() {
   [ -n "$tty" ] && printf '\a' > "$tty" 2>/dev/null || true
 }
 
-# Write (or overwrite) this session's registry record. No-op outside tmux, so an
-# agent running outside a tmux pane is never registered and leaves no orphan.
+# Write (or overwrite) this session's registry record, keyed on session_id. The
+# tmux pane is optional. Under Claude Code's daemon architecture the session (and
+# so this hook) runs detached from any pane, with no TMUX_PANE, so we record an
+# empty pane field and the sidebar files the session under its "Agents" group.
+# When a pane *is* present (an agent that does inherit TMUX_PANE) the recorded
+# pane lets the sidebar group the session under that pane's window instead.
 register_session() {
-  [ -z "${TMUX_PANE:-}" ] && return 0
   local cwd transcript agent_pid pid cmdline
   cwd="$(printf '%s' "$parsed" | sed -n 2p)"
   # Path to the agent's transcript (Claude Code only; empty otherwise). The
@@ -80,7 +83,7 @@ register_session() {
   done
 
   mkdir -p "$REGISTRY"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$TMUX_PANE" "$agent" "$agent_pid" "${cwd:-$PWD}" "$transcript" > "$REGISTRY/$agent-$session_id"
+  printf '%s\t%s\t%s\t%s\t%s\n' "${TMUX_PANE:-}" "$agent" "$agent_pid" "${cwd:-$PWD}" "$transcript" > "$REGISTRY/$agent-$session_id"
 }
 
 # Register only when the record is missing, so the per-event work stays cheap
@@ -98,9 +101,9 @@ if [ "$event" = "end" ]; then
 fi
 
 # Turn state changes. Each ensures the session is registered first, then marks
-# it, so any event revives a dropped entry. The post-ensure guard keeps the
-# no-orphan property: outside tmux register_session is a no-op, so the record is
-# still absent and we write no marker.
+# it, so any event revives a dropped entry. The post-ensure guard is defensive:
+# it skips the marker if registration somehow left no record (e.g. the state dir
+# could not be created).
 #
 # working: a turn started; clears any pending attention.
 if [ "$event" = "working" ]; then
