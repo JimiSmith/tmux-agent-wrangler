@@ -227,7 +227,13 @@ set -g @wrangler-min-width 24  # sidebar snaps back if squeezed below this
 set -g @wrangler-sync-width on # resizing one sidebar resizes them all ('off' to disable)
 set -g @wrangler-auto-install-hooks off # install agent hooks on plugin load ('on' to enable)
 set -g @wrangler-bell off      # ring the terminal bell when an agent needs attention ('on' to enable)
+set -g @wrangler-label name    # agent row label: 'name' (session title, default) | 'dir' (working-dir basename)
 ```
+
+`@wrangler-label name` shows each agent session's own title (Claude Code's
+generated session name) and falls back to the working-directory basename when no
+title is available yet (a just-started session, or an agent like Copilot CLI
+that exposes no title). Set it to `dir` to always show the directory basename.
 
 For the selection highlight to follow focus the moment it changes rather than
 on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:

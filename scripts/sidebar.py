@@ -13,6 +13,7 @@ exits, letting tmux close the window.
 """
 import atexit
 import curses
+import json
 import locale
 import os
 import subprocess
@@ -43,6 +44,77 @@ def min_width():
 def sync_width_enabled():
     value = tmux("show-option", "-gqv", "@wrangler-sync-width").strip().lower()
     return value not in ("off", "0", "no", "false")
+
+
+def label_mode():
+    """How to label an agent session row: its title ('name', default) or the
+    working-directory basename ('dir'). Any unset/unknown value means 'name'."""
+    value = tmux("show-option", "-gqv", "@wrangler-label").strip().lower()
+    return "dir" if value == "dir" else "name"
+
+
+# transcript_path -> (mtime, title). Holds the last title seen for the session,
+# so the render loop only re-reads when the file changes and a scan that misses
+# the title falls back to the previous one rather than regressing.
+_title_cache = {}
+
+# Scan only the transcript's tail: the latest ai-title sits within a few KB of
+# EOF in practice (Claude rewrites it roughly every turn), so this stays cheap
+# regardless of how large the transcript grows.
+_TITLE_TAIL_BYTES = 65536
+
+
+def _scan_tail_for_title(transcript_path):
+    """Last 'ai-title' value in the file's trailing chunk, or "" if none found
+    there / unreadable. Reads only the final _TITLE_TAIL_BYTES bytes."""
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - _TITLE_TAIL_BYTES))
+            chunk = f.read()
+    except OSError:
+        return ""
+    lines = chunk.split(b"\n")
+    if size > _TITLE_TAIL_BYTES:
+        del lines[0]  # first line is likely truncated mid-record
+    title = ""
+    for line in lines:
+        if b'"ai-title"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("type") == "ai-title" and rec.get("aiTitle"):
+            title = rec["aiTitle"]  # keep scanning; the last one wins
+    return title
+
+
+def session_title(transcript_path):
+    """Current 'ai-title' for a Claude session, or "" if none/unavailable.
+
+    Claude Code appends `{"type":"ai-title","aiTitle":...}` records as it
+    (re)titles a session; the last one wins. Empty transcript_path (Copilot, a
+    legacy record, or a just-started session with no title yet) yields "".
+
+    A tail scan that comes up empty keeps the last title seen: a long burst of
+    transcript output can briefly push the title out of the scanned window, but
+    since we rescan every changed tick we captured it while it was recent, and a
+    title is only ever rewritten to a new value, never blanked."""
+    if not transcript_path:
+        return ""
+    try:
+        mtime = os.path.getmtime(transcript_path)
+    except OSError:
+        return ""
+    cached = _title_cache.get(transcript_path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    prev = cached[1] if cached else ""
+    title = _scan_tail_for_title(transcript_path) or prev
+    _title_cache[transcript_path] = (mtime, title)
+    return title
 
 
 def read_width():
@@ -124,6 +196,7 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
         names = sorted(os.listdir(REGISTRY))
     except OSError:
         return []
+    mode = label_mode()
     sessions = []
     for name in names:
         path = os.path.join(REGISTRY, name)
@@ -135,9 +208,10 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
         except OSError:
             continue
         if len(fields) == 2:  # legacy claude-hook.sh format: pane, cwd
-            pane, agent, pid, cwd = fields[0], "claude", "", fields[1]
-        elif len(fields) >= 4:  # pane, agent, pid, cwd
+            pane, agent, pid, cwd, transcript = fields[0], "claude", "", fields[1], ""
+        elif len(fields) >= 4:  # pane, agent, pid, cwd[, transcript]
             pane, agent, pid, cwd = fields[0], fields[1], fields[2], fields[3]
+            transcript = fields[4] if len(fields) >= 5 else ""
         else:
             continue
         window = pane_to_window.get(pane)
@@ -156,9 +230,12 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
                 pass
             attention = False
         status = "attention" if attention else ("working" if os.path.exists(work_marker) else "")
+        display_cwd = pane_paths.get(pane) or cwd
+        title = session_title(transcript) if mode == "name" else ""
+        label = title or os.path.basename(display_cwd.rstrip("/")) or display_cwd
         sessions.append(
-            {"id": name, "agent": agent, "pane": pane, "cwd": pane_paths.get(pane) or cwd,
-             "window": window, "status": status}
+            {"id": name, "agent": agent, "pane": pane, "cwd": display_cwd,
+             "label": label, "window": window, "status": status}
         )
     return sessions
 
@@ -212,7 +289,7 @@ def build_rows(windows, sessions):
             last = len(group) - 1
             for i, s in enumerate(group):
                 branch = "└─" if i == last else "├─"
-                name = os.path.basename(s["cwd"].rstrip("/")) or s["cwd"]
+                name = s["label"]
                 glyph = {"attention": " ●", "working": " ◐"}.get(s["status"], "")
                 rows.append(
                     (f"   {branch} {name}{glyph}",

@@ -23,6 +23,7 @@ import json, sys
 d = json.load(sys.stdin)
 print(d.get("session_id") or d.get("sessionId") or "")
 print(d.get("cwd", ""))
+print(d.get("transcript_path") or d.get("transcriptPath") or "")
 ' 2>/dev/null || true)"
 
 session_id="$(printf '%s' "$parsed" | sed -n 1p)"
@@ -78,6 +79,10 @@ fi
 
 [ -z "${TMUX_PANE:-}" ] && exit 0
 cwd="$(printf '%s' "$parsed" | sed -n 2p)"
+# Path to the agent's transcript (Claude Code only; empty otherwise). The
+# sidebar reads the session's human-readable title from it live, so we record
+# it once here at registration rather than re-reading on every turn event.
+transcript="$(printf '%s' "$parsed" | sed -n 3p)"
 
 # Find the agent process among our ancestors so the sidebar can prune the
 # entry when it exits. Needed because not every agent fires sessionEnd
@@ -100,4 +105,4 @@ for _ in 1 2 3 4 5 6 7 8; do
 done
 
 mkdir -p "$REGISTRY"
-printf '%s\t%s\t%s\t%s\n' "$TMUX_PANE" "$agent" "$agent_pid" "${cwd:-$PWD}" > "$REGISTRY/$agent-$session_id"
+printf '%s\t%s\t%s\t%s\t%s\n' "$TMUX_PANE" "$agent" "$agent_pid" "${cwd:-$PWD}" "$transcript" > "$REGISTRY/$agent-$session_id"
