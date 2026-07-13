@@ -370,11 +370,22 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
     except OSError:
         return []
     mode = label_mode()
+    # Every pane id on the tmux server (all sessions), so a record whose pane
+    # lives in another session can be told apart from one whose pane is gone.
+    all_panes = set(tmux("list-panes", "-a", "-F", "#{pane_id}").split())
     sessions = []
     for name in names:
         path = os.path.join(REGISTRY, name)
         attn_marker = os.path.join(ATTENTION, name)
         work_marker = os.path.join(WORKING, name)
+
+        def prune():
+            for stale in (path, attn_marker, work_marker):
+                try:
+                    os.unlink(stale)
+                except OSError:
+                    pass
+
         try:
             # rstrip only the newline, not tabs: the pane field (field 1) may be
             # empty for a pane-less session, and .strip() would eat that leading
@@ -390,21 +401,23 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
             transcript = fields[4] if len(fields) >= 5 else ""
         else:
             continue
-        # A recorded pane is optional: a pane-less session (no TMUX_PANE at hook
-        # time, e.g. a daemon-hosted Claude Code session) maps to no window and
-        # is shown under the "Agents" group instead. Its liveness is tracked by
-        # PID alone. A session that *did* name a pane which no longer exists is
-        # stale, but only prune it on that basis when we have no live PID to
-        # consult (legacy 2-field records, or a failed PID capture).
+        # A dead agent process is gone everywhere: drop the record outright.
+        if pid.isdigit() and not pid_alive(int(pid)):
+            prune()
+            continue
+        # A recorded pane is optional. Empty means a pane-less session (no
+        # TMUX_PANE at hook time, e.g. a daemon-hosted Claude Code session): it
+        # maps to no window and shows under the "Agents" group. A pane that this
+        # sidebar's session does not own is handled by session scope, not here.
         window = pane_to_window.get(pane) if pane else None
-        pid_dead = pid.isdigit() and not pid_alive(int(pid))
-        pane_gone = bool(pane) and window is None
-        if pid_dead or (pane_gone and not pid.isdigit()):
-            for stale in (path, attn_marker, work_marker):
-                try:
-                    os.unlink(stale)
-                except OSError:
-                    pass
+        if pane and window is None:
+            # The pane is not in this sidebar's tmux session. If it still exists
+            # it belongs to another session, whose own sidebar lists it, so we
+            # skip it here rather than misfiling it under "Agents". If it exists
+            # nowhere the pane is gone: prune the record when no live PID vouches
+            # for it (legacy / failed capture), otherwise just hide it here.
+            if pane not in all_panes and not pid.isdigit():
+                prune()
             continue
         attention = os.path.exists(attn_marker)
         if attention and pane in focused_panes:
