@@ -290,11 +290,13 @@ def build_rows(windows, sessions):
             for i, s in enumerate(group):
                 branch = "└─" if i == last else "├─"
                 name = s["label"]
-                glyph = {"attention": " ●", "working": " ◐"}.get(s["status"], "")
+                # The glyph rides on the item, not the text: draw() pins it to
+                # the right edge so it survives a long title being truncated.
                 rows.append(
-                    (f"   {branch} {name}{glyph}",
+                    (f"   {branch} {name}",
                      {"kind": "agent", "key": ("a", s["id"]), "win": w, "pane": s["pane"],
-                      "status": s["status"]})
+                      "status": s["status"],
+                      "glyph": {"attention": "●", "working": "◐"}.get(s["status"], "")})
                 )
     return rows
 
@@ -325,6 +327,16 @@ def focus(win_id, pane_id=None):
 
 def activate(item):
     focus(item["win"]["id"], item.get("pane"))
+
+
+def _fit(text, field):
+    """Fit `text` to exactly `field` columns: ellipsize when it overflows,
+    otherwise left-pad so the row fills its width (for the selection bar)."""
+    if field <= 0:
+        return ""
+    if len(text) > field:
+        return text[: field - 1] + "…" if field > 1 else "…"
+    return text.ljust(field)
 
 
 def draw(stdscr, rows, selected_key, offset, has_focus):
@@ -360,8 +372,16 @@ def draw(stdscr, rows, selected_key, offset, has_focus):
                 attr |= curses.A_REVERSE
         else:
             attr = curses.A_DIM
+        field = width - 1
+        glyph = item.get("glyph", "") if isinstance(item, dict) else ""
+        if glyph and field >= 3:
+            # Reserve the last two columns for a space + the glyph, so it stays
+            # visible in the rightmost cell however narrow the pane gets.
+            line = f"{_fit(text, field - 2)} {glyph}"
+        else:
+            line = _fit(text, field)
         try:
-            stdscr.addnstr(screen_y, 0, text.ljust(width - 1), width - 1, attr)
+            stdscr.addnstr(screen_y, 0, line, field, attr)
         except curses.error:
             pass
     stdscr.refresh()
