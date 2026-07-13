@@ -37,27 +37,84 @@ WIDTH_FILE = os.path.join(STATE_DIR, "width")
 CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 TEAMS_DIR = os.path.join(CLAUDE_DIR, "teams")
 
-# Claude's named session/teammate colors -> the curses color to render the row
-# in. The 8-color base is the floor; on a 256-color terminal we pick closer
-# xterm-256 shades (orange/pink/purple have no base equivalent). Names Claude
-# does not use fall through to the default agent color.
-_AGENT_COLOR_BASE = {
-    "red": curses.COLOR_RED,
-    "green": curses.COLOR_GREEN,
-    "yellow": curses.COLOR_YELLOW,
-    "orange": curses.COLOR_YELLOW,
-    "blue": curses.COLOR_BLUE,
-    "cyan": curses.COLOR_CYAN,
-    "purple": curses.COLOR_MAGENTA,
-    "pink": curses.COLOR_MAGENTA,
+# Claude's own RGB for each named session/teammate color, per theme family, so
+# a row matches what Claude shows rather than a saturated stand-in. Values are
+# lifted from the CLI's theme palettes (the *_FOR_SUBAGENTS_ONLY tokens):
+#  - MUTED: the Tailwind-600-ish set the plain `dark` and `light` themes share.
+#  - SATURATED / BRIGHT: the two daltonized themes (blue-tinted for deuteranopia).
+# The ANSI themes deliberately defer to the terminal's own palette, so they are
+# rendered with the base curses colors (ANSI_BASE) instead of a fixed RGB.
+_PALETTE_MUTED = {
+    "red": (220, 38, 38), "blue": (106, 155, 204), "green": (22, 163, 74),
+    "yellow": (202, 138, 4), "purple": (130, 125, 189), "orange": (217, 119, 87),
+    "pink": (196, 102, 134), "cyan": (8, 145, 178),
 }
-_AGENT_COLOR_256 = {
-    "red": 196, "green": 46, "yellow": 226, "orange": 208,
-    "blue": 39, "cyan": 51, "purple": 135, "pink": 212,
+_PALETTE_SATURATED = {
+    "red": (204, 0, 0), "blue": (0, 102, 204), "green": (0, 204, 0),
+    "yellow": (255, 204, 0), "purple": (128, 0, 128), "orange": (255, 128, 0),
+    "pink": (255, 102, 178), "cyan": (0, 178, 178),
 }
+_PALETTE_BRIGHT = {
+    "red": (255, 102, 102), "blue": (102, 178, 255), "green": (102, 255, 102),
+    "yellow": (255, 255, 102), "purple": (178, 102, 255), "orange": (255, 178, 102),
+    "pink": (255, 153, 204), "cyan": (102, 204, 204),
+}
+# Fallback for ANSI themes and <256-color terminals: nearest base curses color.
+# orange/pink have no base equivalent, so they share with yellow/magenta.
+_PALETTE_ANSI_BASE = {
+    "red": curses.COLOR_RED, "blue": curses.COLOR_BLUE, "green": curses.COLOR_GREEN,
+    "yellow": curses.COLOR_YELLOW, "purple": curses.COLOR_MAGENTA,
+    "orange": curses.COLOR_YELLOW, "pink": curses.COLOR_MAGENTA, "cyan": curses.COLOR_CYAN,
+}
+_AGENT_COLOR_NAMES = ("red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan")
+
+# The 6 steps of each xterm-256 color-cube axis, for matching an RGB to the
+# nearest of the 216 cube colors (indices 16-231) plus the 24 grays (232-255).
+_CUBE_STEPS = (0, 95, 135, 175, 215, 255)
 
 # color name -> allocated curses color-pair id, filled in by init_agent_colors.
 _agent_color_pairs = {}
+
+
+def _nearest_256(r, g, b):
+    """The xterm-256 palette index (16-255) closest to the given RGB, by squared
+    distance over the color cube and gray ramp. Lets us approximate Claude's
+    exact colors on a 256-color terminal (curses here cannot emit 24-bit)."""
+    best_i, best_d = 16, None
+    for i in range(16, 256):
+        if i < 232:
+            j = i - 16
+            cr, cg, cb = _CUBE_STEPS[j // 36], _CUBE_STEPS[(j // 6) % 6], _CUBE_STEPS[j % 6]
+        else:
+            cr = cg = cb = 8 + (i - 232) * 10
+        d = (cr - r) ** 2 + (cg - g) ** 2 + (cb - b) ** 2
+        if best_d is None or d < best_d:
+            best_i, best_d = i, d
+    return best_i
+
+
+def read_theme():
+    """The user's Claude theme name (settings.json 'theme'), defaulting to 'dark'
+    - which, like 'light', uses the muted palette, so an unknown/missing value is
+    a safe default."""
+    try:
+        with open(os.path.join(CLAUDE_DIR, "settings.json")) as f:
+            return (json.load(f).get("theme") or "dark").lower()
+    except (OSError, ValueError):
+        return "dark"
+
+
+def _theme_palette(theme):
+    """The RGB palette dict for a theme, or None to use the terminal's own ANSI
+    colors (the ANSI themes, or a <256-color terminal). `dark`/`light` and any
+    unrecognized theme share the muted palette."""
+    if theme.endswith("-ansi"):
+        return None
+    if theme == "dark-daltonized":
+        return _PALETTE_BRIGHT
+    if theme == "light-daltonized":
+        return _PALETTE_SATURATED
+    return _PALETTE_MUTED
 
 
 def tmux(*args):
@@ -472,12 +529,14 @@ def _fit(text, field):
 
 
 def init_agent_colors():
-    """Allocate a curses color pair per Claude color name for agent rows, using
-    256-color shades when the terminal supports them. Pairs 1-3 are taken by the
-    base UI colors, so these start at 10."""
-    palette = _AGENT_COLOR_256 if curses.COLORS >= 256 else _AGENT_COLOR_BASE
+    """Allocate a curses color pair per Claude color name for agent rows, matched
+    to the user's theme: the theme's RGB approximated to the nearest xterm-256
+    shade on a 256-color terminal, else the base ANSI color. Pairs 1-3 are taken
+    by the base UI colors, so these start at 10."""
+    rgb = _theme_palette(read_theme()) if curses.COLORS >= 256 else None
     pair_id = 10
-    for cname, cnum in palette.items():
+    for cname in _AGENT_COLOR_NAMES:
+        cnum = _nearest_256(*rgb[cname]) if rgb else _PALETTE_ANSI_BASE[cname]
         try:
             curses.init_pair(pair_id, cnum, -1)
         except curses.error:

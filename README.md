@@ -242,9 +242,12 @@ sessions.
 Each agent row is drawn in that session's own assigned color - the one Claude
 shows for the session (changed with `/color`), or, for an agent-teams teammate,
 its team color - so a row's color matches the session it points at. Sessions
-with no assigned color (e.g. Copilot CLI) use a default. Colors render as
-closer shades on a 256-color terminal and fall back to the nearest of the eight
-base colors otherwise; turn state stays legible through the `◐`/`●` glyph.
+with no assigned color (e.g. Copilot CLI) use a default. The shade is matched to
+your Claude theme (read from `~/.claude/settings.json`): on a 256-color terminal
+each color is approximated to the nearest xterm-256 shade of Claude's actual
+theme color (curses cannot emit 24-bit here, so it is a close match, not exact);
+the ANSI themes and non-256-color terminals fall back to the base terminal
+colors. Turn state stays legible through the `◐`/`●` glyph.
 
 For the selection highlight to follow focus the moment it changes rather than
 on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:
