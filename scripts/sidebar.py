@@ -30,6 +30,35 @@ WORKING = os.path.join(STATE_DIR, "working")
 SELECTION_FILE = os.path.join(STATE_DIR, "selection")
 WIDTH_FILE = os.path.join(STATE_DIR, "width")
 
+# Claude Code's config dir, home to the team configs
+# (teams/<id>/config.json) we read agent-teams teammate colors from - those
+# are not in the teammate's transcript. Honors CLAUDE_CONFIG_DIR like Claude
+# Code itself.
+CLAUDE_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+TEAMS_DIR = os.path.join(CLAUDE_DIR, "teams")
+
+# Claude's named session/teammate colors -> the curses color to render the row
+# in. The 8-color base is the floor; on a 256-color terminal we pick closer
+# xterm-256 shades (orange/pink/purple have no base equivalent). Names Claude
+# does not use fall through to the default agent color.
+_AGENT_COLOR_BASE = {
+    "red": curses.COLOR_RED,
+    "green": curses.COLOR_GREEN,
+    "yellow": curses.COLOR_YELLOW,
+    "orange": curses.COLOR_YELLOW,
+    "blue": curses.COLOR_BLUE,
+    "cyan": curses.COLOR_CYAN,
+    "purple": curses.COLOR_MAGENTA,
+    "pink": curses.COLOR_MAGENTA,
+}
+_AGENT_COLOR_256 = {
+    "red": 196, "green": 46, "yellow": 226, "orange": 208,
+    "blue": 39, "cyan": 51, "purple": 135, "pink": 212,
+}
+
+# color name -> allocated curses color-pair id, filled in by init_agent_colors.
+_agent_color_pairs = {}
+
 
 def tmux(*args):
     result = subprocess.run(("tmux",) + args, capture_output=True, text=True)
@@ -53,11 +82,11 @@ def label_mode():
     return "dir" if value == "dir" else "name"
 
 
-# transcript_path -> (mtime, title, custom, agent). Holds the last title and
-# teammate name resolved for the session so the render loop only re-reads when
-# the file changes; `custom` marks a title from a manual /rename, which is
-# sticky (see session_meta). A scan that finds nothing keeps the cached values
-# rather than regressing.
+# transcript_path -> (mtime, title, custom, agent, team, color). Holds the last
+# title, teammate identity, and color resolved for the session so the render
+# loop only re-reads when the file changes; `custom` marks a title from a manual
+# /rename, which is sticky (see session_meta). A scan that finds nothing keeps
+# the cached values rather than regressing.
 _title_cache = {}
 
 # Scan only the transcript's tail: the title records sit within a few KB of EOF
@@ -67,15 +96,17 @@ _TITLE_TAIL_BYTES = 65536
 
 
 def _scan_tail(transcript_path):
-    """Titles and teammate name from the file's trailing chunk, as
-    (custom, ai, agent): `custom` = last /rename title ('custom-title'),
-    `ai` = last auto title ('ai-title'), `agent` = the teammate's agentName when
-    this is a teammate session. Each "" if not found there / unreadable.
+    """Titles, teammate identity, and color from the file's trailing chunk, as
+    (custom, ai, agent, team, color): `custom` = last /rename title
+    ('custom-title'), `ai` = last auto title ('ai-title'), `agent` / `team` =
+    the teammate's agentName / teamName when this is a teammate session, `color`
+    = last color set via /color ('agent-color'). Each "" if not found there /
+    unreadable.
 
-    A teammate stamps agentName on every conversation record, whereas a normal
-    session carries agentName only inside a /rename 'agent-name' record, so we
-    take it from any record that is *not* an 'agent-name' record. Reads only the
-    final _TITLE_TAIL_BYTES bytes."""
+    A teammate stamps agentName (and teamName) on every conversation record,
+    whereas a normal session carries agentName only inside a /rename
+    'agent-name' record, so we read them from any record that is *not* an
+    'agent-name' record. Reads only the final _TITLE_TAIL_BYTES bytes."""
     try:
         with open(transcript_path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -83,12 +114,12 @@ def _scan_tail(transcript_path):
             f.seek(max(0, size - _TITLE_TAIL_BYTES))
             chunk = f.read()
     except OSError:
-        return "", "", ""
+        return "", "", "", "", ""
     lines = chunk.split(b"\n")
     if size > _TITLE_TAIL_BYTES:
         del lines[0]  # first line is likely truncated mid-record
-    custom = ai = agent = ""
-    for line in lines:  # keep scanning; the last title of each kind wins
+    custom = ai = agent = team = color = ""
+    for line in lines:  # keep scanning; the last record of each kind wins
         if b'"custom-title"' in line:
             try:
                 rec = json.loads(line)
@@ -103,43 +134,55 @@ def _scan_tail(transcript_path):
                 continue
             if rec.get("type") == "ai-title" and rec.get("aiTitle"):
                 ai = rec["aiTitle"]
-        elif not agent and b'"agentName"' in line:
+        elif b'"agent-color"' in line:
             try:
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if rec.get("type") != "agent-name" and rec.get("agentName"):
-                agent = rec["agentName"]
-    return custom, ai, agent
+            if rec.get("type") == "agent-color" and rec.get("agentColor"):
+                color = rec["agentColor"]
+        elif (not agent or not team) and b'"agentName"' in line:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("type") != "agent-name":  # agentName/teamName ride together
+                agent = agent or rec.get("agentName") or ""
+                team = team or rec.get("teamName") or ""
+    return custom, ai, agent, team, color
 
 
 def session_meta(transcript_path):
-    """(title, agent_name) for a Claude session.
+    """(title, agent_name, team, color) for a Claude session.
 
     title: the current display title. Claude records an auto-generated
     'ai-title' (rewritten roughly every turn) and, on a /rename, a
     'custom-title'; the manual one wins and is sticky, overriding the auto title
-    that Claude goes on emitting. agent_name: the teammate name when this is a
-    teammate session (see _scan_tail), else "". Empty transcript_path (Copilot,
-    a legacy record, or a just-started session with no title yet) yields
-    ("", "").
+    that Claude goes on emitting. agent_name / team: the teammate name and team
+    id when this is a teammate session (see _scan_tail), else "". color: the
+    session's assigned color from the last /color ('agent-color' record), else
+    "" (a teammate's color is not recorded here - resolve it from `team` via
+    team_pane_colors). Empty transcript_path (Copilot, a legacy record, or a
+    just-started session) yields ("", "", "", "").
 
     A scan that comes up empty keeps the last values seen: a long burst of output
     can briefly push them out of the scanned tail, but we rescan every changed
     tick, so we captured them while recent."""
     if not transcript_path:
-        return "", ""
+        return "", "", "", ""
     try:
         mtime = os.path.getmtime(transcript_path)
     except OSError:
-        return "", ""
+        return "", "", "", ""
     cached = _title_cache.get(transcript_path)
     if cached and cached[0] == mtime:
-        return cached[1], cached[3]
+        return cached[1], cached[3], cached[4], cached[5]
     prev_title = cached[1] if cached else ""
     prev_custom = cached[2] if cached else False
     prev_agent = cached[3] if cached else ""
-    custom, ai, agent = _scan_tail(transcript_path)
+    prev_team = cached[4] if cached else ""
+    prev_color = cached[5] if cached else ""
+    custom, ai, agent, team, color = _scan_tail(transcript_path)
     if custom:
         title, is_custom = custom, True
     elif prev_custom:
@@ -149,8 +192,48 @@ def session_meta(transcript_path):
     else:
         title, is_custom = prev_title, prev_custom
     agent = agent or prev_agent  # sticky, like the title
-    _title_cache[transcript_path] = (mtime, title, is_custom, agent)
-    return title, agent
+    team = team or prev_team
+    color = color or prev_color
+    _title_cache[transcript_path] = (mtime, title, is_custom, agent, team, color)
+    return title, agent, team, color
+
+
+# team id -> (mtime, {pane_id: color}). A team's config is read only when we
+# have a teammate from that team (keyed by its transcript's teamName), and
+# re-parsed only when the config's mtime moves - no directory scanning.
+_team_colors_cache = {}
+
+
+def team_pane_colors(team):
+    """Map tmux pane id -> assigned color for the members of one agent-teams
+    team, read from TEAMS_DIR/<team>/config.json.
+
+    Claude records a teammate's color there (one member per teammate, with a
+    `tmuxPaneId` and `color`), never in the teammate's own transcript - so unlike
+    a top-level session's /color (see session_meta) it has to be looked up here.
+    Empty `team`, or a missing/unreadable config, yields {}."""
+    if not team:
+        return {}
+    cfg = os.path.join(TEAMS_DIR, team, "config.json")
+    try:
+        mtime = os.path.getmtime(cfg)
+    except OSError:
+        return {}
+    cached = _team_colors_cache.get(team)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    panes = {}
+    try:
+        with open(cfg) as f:
+            members = json.load(f).get("members", [])
+    except (OSError, ValueError):
+        members = []
+    for m in members:
+        pane, color = m.get("tmuxPaneId"), m.get("color")
+        if pane and color:
+            panes[pane] = color
+    _team_colors_cache[team] = (mtime, panes)
+    return panes
 
 
 def read_width():
@@ -268,7 +351,12 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
         status = "attention" if attention else ("working" if os.path.exists(work_marker) else "")
         display_cwd = pane_paths.get(pane) or cwd
         dir_name = os.path.basename(display_cwd.rstrip("/")) or display_cwd
-        title, agent_name = session_meta(transcript)
+        title, agent_name, team, color = session_meta(transcript)
+        # A top-level session records its color in the transcript; a teammate's
+        # lives in its team config instead, so fall back to that (by pane), read
+        # only for actual teammates.
+        if not color and agent_name:
+            color = team_pane_colors(team).get(pane, "")
         if agent_name:
             # Agent-teams teammate: prefix "@name". In name mode we drop the dir
             # fallback so an un-titled teammate reads as just "@name" until it
@@ -279,7 +367,7 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
             label = (title if mode == "name" else "") or dir_name
         sessions.append(
             {"id": name, "agent": agent, "pane": pane, "cwd": display_cwd,
-             "label": label, "window": window, "status": status}
+             "label": label, "window": window, "status": status, "color": color}
         )
     return sessions
 
@@ -339,7 +427,7 @@ def build_rows(windows, sessions):
                 rows.append(
                     (f"   {branch} {name}",
                      {"kind": "agent", "key": ("a", s["id"]), "win": w, "pane": s["pane"],
-                      "status": s["status"],
+                      "status": s["status"], "color": s["color"],
                       "glyph": {"attention": "●", "working": "◐"}.get(s["status"], "")})
                 )
     return rows
@@ -383,6 +471,21 @@ def _fit(text, field):
     return text.ljust(field)
 
 
+def init_agent_colors():
+    """Allocate a curses color pair per Claude color name for agent rows, using
+    256-color shades when the terminal supports them. Pairs 1-3 are taken by the
+    base UI colors, so these start at 10."""
+    palette = _AGENT_COLOR_256 if curses.COLORS >= 256 else _AGENT_COLOR_BASE
+    pair_id = 10
+    for cname, cnum in palette.items():
+        try:
+            curses.init_pair(pair_id, cnum, -1)
+        except curses.error:
+            continue
+        _agent_color_pairs[cname] = pair_id
+        pair_id += 1
+
+
 def draw(stdscr, rows, selected_key, offset, has_focus):
     height, width = stdscr.getmaxyx()
     sel_row = next(
@@ -405,11 +508,14 @@ def draw(stdscr, rows, selected_key, offset, has_focus):
                 if item["win"]["active"]:
                     attr |= curses.color_pair(1)
             elif item["kind"] == "agent":
-                attr = curses.color_pair(2)
-                if item["status"] == "attention":
-                    attr = curses.color_pair(3) | curses.A_BOLD
-                elif item["status"] == "working":
-                    attr = curses.color_pair(2) | curses.A_BOLD
+                # Color the whole row in the agent's own assigned color (Claude's
+                # /color or the teammate's team color), falling back to the
+                # default agent color when none is known. Turn state is carried
+                # by the pinned glyph (●/◐) and bold, so it survives here.
+                pair = _agent_color_pairs.get(item.get("color") or "")
+                attr = curses.color_pair(pair if pair else 2)
+                if item["status"] in ("attention", "working"):
+                    attr |= curses.A_BOLD
             else:
                 attr = curses.A_DIM
             if has_focus and item["key"] == selected_key:
@@ -462,6 +568,7 @@ def main(stdscr):
     curses.init_pair(1, curses.COLOR_GREEN, -1)
     curses.init_pair(2, curses.COLOR_CYAN, -1)
     curses.init_pair(3, curses.COLOR_YELLOW, -1)
+    init_agent_colors()
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
     curses.mouseinterval(0)
     stdscr.timeout(1000)
