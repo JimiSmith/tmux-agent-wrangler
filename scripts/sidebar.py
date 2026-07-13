@@ -68,29 +68,26 @@ _PALETTE_ANSI_BASE = {
 }
 _AGENT_COLOR_NAMES = ("red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan")
 
-# The 6 steps of each xterm-256 color-cube axis, for matching an RGB to the
-# nearest of the 216 cube colors (indices 16-231) plus the 24 grays (232-255).
-_CUBE_STEPS = (0, 95, 135, 175, 215, 255)
-
 # color name -> allocated curses color-pair id, filled in by init_agent_colors.
 _agent_color_pairs = {}
 
 
-def _nearest_256(r, g, b):
-    """The xterm-256 palette index (16-255) closest to the given RGB, by squared
-    distance over the color cube and gray ramp. Lets us approximate Claude's
-    exact colors on a 256-color terminal (curses here cannot emit 24-bit)."""
-    best_i, best_d = 16, None
-    for i in range(16, 256):
-        if i < 232:
-            j = i - 16
-            cr, cg, cb = _CUBE_STEPS[j // 36], _CUBE_STEPS[(j // 6) % 6], _CUBE_STEPS[j % 6]
-        else:
-            cr = cg = cb = 8 + (i - 232) * 10
-        d = (cr - r) ** 2 + (cg - g) ** 2 + (cb - b) ** 2
-        if best_d is None or d < best_d:
-            best_i, best_d = i, d
-    return best_i
+def _rgb_to_ansi256(r, g, b):
+    """The xterm-256 index Claude itself would use for this RGB.
+
+    Claude renders a session's color by converting its theme RGB to a 256-color
+    index with the ansi-styles (chalk) algorithm: the 6x6x6 cube, rounding each
+    channel to its nearest sixth, with a separate 24-step gray ramp. We use that
+    exact formula (not a nearest-RGB distance, which lands a shade off - e.g.
+    dark yellow 202,138,4 gives 172, an orange, where Claude emits 178, a gold)
+    so a row's index equals the one Claude prints and the colors match."""
+    if r == g == b:
+        if r < 8:
+            return 16
+        if r > 248:
+            return 231
+        return 232 + round((r - 8) / 247 * 24)
+    return 16 + 36 * round(r / 255 * 5) + 6 * round(g / 255 * 5) + round(b / 255 * 5)
 
 
 def read_theme():
@@ -530,13 +527,13 @@ def _fit(text, field):
 
 def init_agent_colors():
     """Allocate a curses color pair per Claude color name for agent rows, matched
-    to the user's theme: the theme's RGB approximated to the nearest xterm-256
-    shade on a 256-color terminal, else the base ANSI color. Pairs 1-3 are taken
-    by the base UI colors, so these start at 10."""
+    to the user's theme: the theme's RGB mapped to the same xterm-256 index
+    Claude uses (see _rgb_to_ansi256) on a 256-color terminal, else the base ANSI
+    color. Pairs 1-3 are taken by the base UI colors, so these start at 10."""
     rgb = _theme_palette(read_theme()) if curses.COLORS >= 256 else None
     pair_id = 10
     for cname in _AGENT_COLOR_NAMES:
-        cnum = _nearest_256(*rgb[cname]) if rgb else _PALETTE_ANSI_BASE[cname]
+        cnum = _rgb_to_ansi256(*rgb[cname]) if rgb else _PALETTE_ANSI_BASE[cname]
         try:
             curses.init_pair(pair_id, cnum, -1)
         except curses.error:
