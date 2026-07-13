@@ -48,16 +48,63 @@ ring_bell() {
   [ -n "$tty" ] && printf '\a' > "$tty" 2>/dev/null || true
 }
 
+# Write (or overwrite) this session's registry record. No-op outside tmux, so an
+# agent running outside a tmux pane is never registered and leaves no orphan.
+register_session() {
+  [ -z "${TMUX_PANE:-}" ] && return 0
+  local cwd transcript agent_pid pid cmdline
+  cwd="$(printf '%s' "$parsed" | sed -n 2p)"
+  # Path to the agent's transcript (Claude Code only; empty otherwise). The
+  # sidebar reads the session's human-readable title from it live, so we record
+  # it once at registration rather than re-reading on every turn event.
+  transcript="$(printf '%s' "$parsed" | sed -n 3p)"
+
+  # Find the agent process among our ancestors so the sidebar can prune the
+  # entry when it exits. Needed because not every agent fires sessionEnd
+  # reliably (Copilot CLI fires it per prompt-cycle; see README).
+  agent_pid=""
+  pid=$$
+  for _ in 1 2 3 4 5 6 7 8; do
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
+      break
+    fi
+    cmdline="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    case "$cmdline" in
+      *agent-hook*) continue ;;
+    esac
+    if printf '%s' "$cmdline" | grep -qi "$agent"; then
+      agent_pid="$pid"
+      break
+    fi
+  done
+
+  mkdir -p "$REGISTRY"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$TMUX_PANE" "$agent" "$agent_pid" "${cwd:-$PWD}" "$transcript" > "$REGISTRY/$agent-$session_id"
+}
+
+# Register only when the record is missing, so the per-event work stays cheap
+# (the ancestry walk runs once per session, not on every high-frequency event).
+# This makes every event self-healing: a session whose `start` was missed (e.g.
+# a resumed Claude Code session, where SessionStart does not re-register it)
+# reappears in the sidebar as soon as any other hook fires.
+ensure_registered() {
+  [ -f "$REGISTRY/$agent-$session_id" ] || register_session
+}
+
 if [ "$event" = "end" ]; then
   rm -f "$REGISTRY/$agent-$session_id" "$ATTENTION/$agent-$session_id" "$WORKING/$agent-$session_id"
   exit 0
 fi
 
-# Turn state changes. Only mark sessions we already track, so an event from an
-# agent running outside tmux (never registered) leaves no orphan marker.
+# Turn state changes. Each ensures the session is registered first, then marks
+# it, so any event revives a dropped entry. The post-ensure guard keeps the
+# no-orphan property: outside tmux register_session is a no-op, so the record is
+# still absent and we write no marker.
 #
 # working: a turn started; clears any pending attention.
 if [ "$event" = "working" ]; then
+  ensure_registered
   [ -f "$REGISTRY/$agent-$session_id" ] || exit 0
   mkdir -p "$WORKING"
   : > "$WORKING/$agent-$session_id"
@@ -67,6 +114,7 @@ fi
 
 # needsAttention: a turn finished or a notification fired; clears working.
 if [ "$event" = "needsAttention" ]; then
+  ensure_registered
   [ -f "$REGISTRY/$agent-$session_id" ] || exit 0
   mkdir -p "$ATTENTION"
   # Ring only on the transition into attention: if the marker already exists
@@ -77,32 +125,5 @@ if [ "$event" = "needsAttention" ]; then
   exit 0
 fi
 
-[ -z "${TMUX_PANE:-}" ] && exit 0
-cwd="$(printf '%s' "$parsed" | sed -n 2p)"
-# Path to the agent's transcript (Claude Code only; empty otherwise). The
-# sidebar reads the session's human-readable title from it live, so we record
-# it once here at registration rather than re-reading on every turn event.
-transcript="$(printf '%s' "$parsed" | sed -n 3p)"
-
-# Find the agent process among our ancestors so the sidebar can prune the
-# entry when it exits. Needed because not every agent fires sessionEnd
-# reliably (Copilot CLI fires it per prompt-cycle; see README).
-agent_pid=""
-pid=$$
-for _ in 1 2 3 4 5 6 7 8; do
-  pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
-  if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
-    break
-  fi
-  cmdline="$(ps -o command= -p "$pid" 2>/dev/null || true)"
-  case "$cmdline" in
-    *agent-hook*) continue ;;
-  esac
-  if printf '%s' "$cmdline" | grep -qi "$agent"; then
-    agent_pid="$pid"
-    break
-  fi
-done
-
-mkdir -p "$REGISTRY"
-printf '%s\t%s\t%s\t%s\t%s\n' "$TMUX_PANE" "$agent" "$agent_pid" "${cwd:-$PWD}" "$transcript" > "$REGISTRY/$agent-$session_id"
+# start (or any other event): (re)register, refreshing pane/pid/cwd/transcript.
+register_session

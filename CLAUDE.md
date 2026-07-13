@@ -100,8 +100,9 @@ independent instances behaving as one.
   from the agent's own lifecycle hooks as
   `agent-hook.sh <agent> <start|end|working|needsAttention>` with the hook JSON
   on stdin (parses both Claude Code snake_case and Copilot CLI camelCase). The
-  start record is `pane<TAB>agent<TAB>pid<TAB>cwd`; it walks the process
-  ancestry to find the agent's PID so the sidebar can prune the entry when the
+  registry record is `pane<TAB>agent<TAB>pid<TAB>cwd<TAB>transcript`; it walks
+  the process ancestry to find the agent's PID so the sidebar can prune the
+  entry when the
   process dies. This PID-pruning exists because not every agent fires a reliable
   `end` event (Copilot CLI fires hooks per prompt-cycle, so its `sessionEnd`
   maps to `needsAttention`, not `end` — see README). `working` (Claude Code's
@@ -111,8 +112,14 @@ independent instances behaving as one.
   the `idle_prompt` and `elicitation_dialog` `Notification` types, and a
   `PreToolUse` matcher for the `AskUserQuestion` / `ExitPlanMode` interactive
   tools; Copilot's `sessionEnd`) each write their marker and delete the other's,
-  so the two are mutually exclusive; both
-  only mark an already-registered session, so stray events leave no orphan. The
+  so the two are mutually exclusive. Every event (`start`, `working`,
+  `needsAttention`) self-registers the session first via `register_session` if
+  its registry record is missing, so a session whose `start` was missed — most
+  visibly a resumed Claude Code session, where SessionStart does not re-create
+  the entry — reappears the instant any later hook fires. `register_session` is
+  a no-op outside tmux (no `TMUX_PANE`), and the marker branches re-check the
+  record exists after ensuring registration, so an agent running outside a tmux
+  pane still leaves no orphan. The
   sidebar renders `◐` for working and `●` for attention, and deletes the
   attention marker once its pane is focused (the working marker persists until
   the turn ends). `sidebar.py` prunes any registry entry (and both markers)
