@@ -29,6 +29,24 @@ session_id="$(printf '%s' "$parsed" | sed -n 1p)"
 session_id="${session_id//\//_}"
 [ -z "$session_id" ] && exit 0
 
+# Ring the terminal bell in the session's pane, gated on @wrangler-bell (off by
+# default). Writing BEL to the pane's tty makes tmux apply its own bell handling
+# (audible bell plus the monitor-bell window flag when you are in another
+# window), so audible-vs-visual stays with the user's tmux/terminal config. The
+# pane is field 1 of the registry record. Best-effort: never fail the hook over
+# a bell.
+ring_bell() {
+  case "$(tmux show-option -gqv @wrangler-bell 2>/dev/null)" in
+    on|1|yes|true) ;;
+    *) return 0 ;;
+  esac
+  local pane tty
+  pane="$(cut -f1 "$REGISTRY/$agent-$session_id" 2>/dev/null)" || return 0
+  [ -n "$pane" ] || return 0
+  tty="$(tmux display-message -p -t "$pane" '#{pane_tty}' 2>/dev/null)" || return 0
+  [ -n "$tty" ] && printf '\a' > "$tty" 2>/dev/null || true
+}
+
 if [ "$event" = "end" ]; then
   rm -f "$REGISTRY/$agent-$session_id" "$ATTENTION/$agent-$session_id" "$WORKING/$agent-$session_id"
   exit 0
@@ -50,6 +68,9 @@ fi
 if [ "$event" = "needsAttention" ]; then
   [ -f "$REGISTRY/$agent-$session_id" ] || exit 0
   mkdir -p "$ATTENTION"
+  # Ring only on the transition into attention: if the marker already exists
+  # the session was flagged, so a repeat event stays silent.
+  [ -f "$ATTENTION/$agent-$session_id" ] || ring_bell
   : > "$ATTENTION/$agent-$session_id"
   rm -f "$WORKING/$agent-$session_id"
   exit 0

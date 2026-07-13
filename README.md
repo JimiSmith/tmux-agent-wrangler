@@ -226,6 +226,7 @@ set -g @wrangler-width 32      # sidebar width in columns
 set -g @wrangler-min-width 24  # sidebar snaps back if squeezed below this
 set -g @wrangler-sync-width on # resizing one sidebar resizes them all ('off' to disable)
 set -g @wrangler-auto-install-hooks off # install agent hooks on plugin load ('on' to enable)
+set -g @wrangler-bell off      # ring the terminal bell when an agent needs attention ('on' to enable)
 ```
 
 For the selection highlight to follow focus the moment it changes rather than
