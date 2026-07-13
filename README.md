@@ -235,6 +235,10 @@ generated session name) and falls back to the working-directory basename when no
 title is available yet (a just-started session, or an agent like Copilot CLI
 that exposes no title). Set it to `dir` to always show the directory basename.
 
+Agent-teams teammates are labelled `@name - title` (just `@name` until the
+teammate has a title) in either mode, so you can tell them from top-level
+sessions.
+
 For the selection highlight to follow focus the moment it changes rather than
 on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:
 
