@@ -52,9 +52,9 @@ ring_bell() {
 
 # Raise an OSC 9 desktop notification (the ConEmu/iTerm2 toast escape) in the
 # session's terminal, gated on @wrangler-osc-notify (off by default). The body
-# reads exactly as the sidebar row does: "<window index>: <window> · <label>",
-# where the label comes from the shared session_labels module so it matches the
-# sidebar's rendering (title / teammate @name / dir fallback).
+# reads "<window> · <label>", where the window name and the label match the
+# sidebar's rendering (the label comes from the shared session_labels module -
+# title / teammate @name / dir fallback).
 #
 # Unlike the bell, this writes to each attached client's tty, not the pane's:
 # tmux 3.7 consumes a pane's OSC 9 into its own OSC 9;4 progress parser, so a
@@ -66,20 +66,20 @@ notify_osc9() {
     on|1|yes|true) ;;
     *) return 0 ;;
   esac
-  local pane cwd transcript display_cwd label_opt win_heading label body session
+  local pane cwd transcript display_cwd label_opt win_name label body session
   pane="$(cut -f1 "$REGISTRY/$agent-$session_id" 2>/dev/null)" || return 0
   [ -n "$pane" ] || return 0
   cwd="$(printf '%s' "$parsed" | sed -n 2p)"
   transcript="$(printf '%s' "$parsed" | sed -n 3p)"
-  win_heading="$(tmux display-message -p -t "$pane" '#{window_index}: #{window_name}' 2>/dev/null)" || return 0
+  win_name="$(tmux display-message -p -t "$pane" '#{window_name}' 2>/dev/null)" || return 0
   display_cwd="$(tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null)"
   display_cwd="${display_cwd:-$cwd}"
   label_opt="$(tmux show-option -gqv @wrangler-label 2>/dev/null)"
   label="$(PYTHONPATH="$SCRIPT_DIR" python3 -c 'import sys, session_labels; print(session_labels.notification_label(sys.argv[1], sys.argv[2], sys.argv[3]))' "$transcript" "$display_cwd" "$label_opt" 2>/dev/null)"
   if [ -n "$label" ]; then
-    body="$win_heading · $label"
+    body="$win_name · $label"
   else
-    body="$win_heading"
+    body="$win_name"
   fi
   session="$(tmux display-message -p -t "$pane" '#{session_name}' 2>/dev/null)" || return 0
   tmux list-clients -t "$session" -F '#{client_tty}' 2>/dev/null | while read -r ctty; do

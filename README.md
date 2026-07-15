@@ -270,8 +270,9 @@ with no OSC progress falls back to its `◐`/`●` hook glyph.
 
 `@wrangler-osc-notify` (default off) raises an OSC 9 desktop notification the
 moment an agent needs attention — the same instant `@wrangler-bell` rings, and
-gated independently of it. Its body reads exactly as the sidebar row does,
-`<window index>: <window> · <label>` (e.g. `1: vim · api-service`). The escape is
+gated independently of it. Its body is `<window> · <label>` (e.g.
+`vim · api-service`), the window name and the row label as the sidebar shows
+them. The escape is
 sent to the terminal itself rather than through tmux, so the notification arrives
 whatever window you are on; it needs a terminal that understands OSC 9
 notifications (ConEmu/iTerm2 and compatibles), and is silently ignored by others.
