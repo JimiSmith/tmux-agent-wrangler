@@ -71,6 +71,10 @@ _AGENT_COLOR_NAMES = ("red", "blue", "green", "yellow", "purple", "orange", "pin
 # color name -> allocated curses color-pair id, filled in by init_agent_colors.
 _agent_color_pairs = {}
 
+# OSC-progress state color key -> the base UI color pair allocated in main().
+# green (1) and yellow (3) are shared with other UI uses; red (4) is added there.
+_INDICATOR_PAIRS = {"green": 1, "yellow": 3, "red": 4}
+
 
 def _rgb_to_ansi256(r, g, b):
     """The xterm-256 index Claude itself would use for this RGB.
@@ -134,6 +138,21 @@ def label_mode():
     working-directory basename ('dir'). Any unset/unknown value means 'name'."""
     value = tmux("show-option", "-gqv", "@wrangler-label").strip().lower()
     return "dir" if value == "dir" else "name"
+
+
+def hook_progress_enabled():
+    """Whether to show the hook-driven ◐/● working/attention indicators.
+    Default on (opt-out); a display toggle only - agent-hook.sh keeps writing
+    its markers regardless."""
+    value = tmux("show-option", "-gqv", "@wrangler-hook-progress").strip().lower()
+    return value not in ("off", "0", "no", "false")
+
+
+def osc_progress_enabled():
+    """Whether to show OSC 9;4 progress (pane_pb_state/pane_pb_progress) as a
+    percentage. Default off (opt-in)."""
+    value = tmux("show-option", "-gqv", "@wrangler-osc-progress").strip().lower()
+    return value in ("on", "1", "yes", "true")
 
 
 # transcript_path -> (mtime, title, custom, agent, team, color). Holds the last
@@ -319,26 +338,35 @@ def fetch_windows():
     by_id = {w["id"]: w for w in windows}
     pane_to_window = {}
     pane_paths = {}
+    pane_progress = {}
     sidebars = set()
     sidebar_active = False
-    # pane_current_path sits before pane_title so the free-form title stays the
-    # trailing field; a path is very unlikely to contain a tab.
+    # The OSC 9;4 pane vars (pb_state / pb_progress) are fixed enum/number
+    # fields, so they sit before pane_current_path and pane_title; the free-form
+    # title stays the trailing field and a path is very unlikely to contain a
+    # tab. On a tmux too old to know these vars they expand to empty, which we
+    # read as "no progress".
     for line in tmux(
         "list-panes", "-s", "-F",
-        "#{window_id}\t#{pane_id}\t#{pane_index}\t#{pane_active}\t#{@wrangler_sidebar}\t#{pane_current_path}\t#{pane_title}",
+        "#{window_id}\t#{pane_id}\t#{pane_index}\t#{pane_active}\t#{@wrangler_sidebar}\t#{pane_pb_state}\t#{pane_pb_progress}\t#{pane_current_path}\t#{pane_title}",
     ).splitlines():
-        wid, pid, index, active, flag, path, title = line.split("\t", 6)
+        wid, pid, index, active, flag, pb_state, pb_progress, path, title = line.split("\t", 8)
         if wid not in by_id:
             continue
         pane_to_window[pid] = by_id[wid]
         pane_paths[pid] = path
+        progress = int(pb_progress) if pb_progress.isdigit() else None
+        pane_progress[pid] = (pb_state, progress)
         if flag == "1" or pid == SIDEBAR_PANE:
             sidebars.add(pid)
             if pid == SIDEBAR_PANE:
                 sidebar_active = active == "1"
             continue
-        by_id[wid]["panes"].append({"id": pid, "index": index, "active": active == "1", "title": title})
-    return windows, pane_to_window, sidebars, pane_paths, sidebar_active
+        by_id[wid]["panes"].append(
+            {"id": pid, "index": index, "active": active == "1", "title": title,
+             "pb_state": pb_state, "pb_progress": progress}
+        )
+    return windows, pane_to_window, sidebars, pane_paths, pane_progress, sidebar_active
 
 
 def pid_alive(pid):
@@ -468,7 +496,35 @@ def write_selection(key):
         pass
 
 
-def _append_agent_rows(rows, group, win):
+# pane_pb_state values that mean "no progress to show": `hidden` (a pane that
+# never set progress or cleared it via OSC 9;4;0) and the empty string a tmux
+# too old to know the var expands to.
+_INACTIVE_STATES = ("", "hidden")
+
+# OSC 9;4 state -> the color key used for its percentage. 'indeterminate' has no
+# meaningful number so it renders as a busy ◐ in the row's own color instead.
+_STATE_COLOR = {"normal": "green", "paused": "yellow", "error": "red"}
+
+
+def progress_indicator(hook_status, pb_state, pb_progress, hook_on, osc_on):
+    """(text, color) for the right-pinned indicator, or ("", None).
+
+    OSC wins when the pane reports an active state (see _INACTIVE_STATES);
+    otherwise the hook ◐/● glyph. `color` is a state-color key for OSC
+    percentages, or None to inherit the row's own attribute (the hook glyph and
+    OSC 'indeterminate').
+    """
+    if osc_on and pb_state not in _INACTIVE_STATES:
+        if pb_state == "indeterminate":
+            return "◐", None
+        text = f"{pb_progress}%" if pb_progress is not None else "◐"
+        return text, _STATE_COLOR.get(pb_state)
+    if hook_on and hook_status in ("working", "attention"):
+        return {"attention": "●", "working": "◐"}[hook_status], None
+    return "", None
+
+
+def _append_agent_rows(rows, group, win, pane_progress, hook_on, osc_on):
     """Append the tree rows for one group of agent sessions under a heading.
 
     `win` is the window the group is filed under, or None for the pane-less
@@ -478,18 +534,28 @@ def _append_agent_rows(rows, group, win):
     last = len(group) - 1
     for i, s in enumerate(group):
         branch = "└─" if i == last else "├─"
-        # The glyph rides on the item, not the text: draw() pins it to the
+        pb_state, pb_progress = pane_progress.get(s["pane"], ("", None))
+        indicator, indicator_color = progress_indicator(
+            s["status"], pb_state, pb_progress, hook_on, osc_on
+        )
+        # The indicator rides on the item, not the text: draw() pins it to the
         # right edge so it survives a long title being truncated.
         rows.append(
             (f"   {branch} {s['label']}",
              {"kind": "agent", "key": ("a", s["id"]), "win": win, "pane": s["pane"],
               "status": s["status"], "color": s["color"],
-              "glyph": {"attention": "●", "working": "◐"}.get(s["status"], "")})
+              "indicator": indicator, "indicator_color": indicator_color})
         )
 
 
-def build_rows(windows, sessions):
-    """Flat list of (text, item) rows; item is a selectable dict, "header", or None."""
+def build_rows(windows, sessions, pane_progress, pane_status, hook_on, osc_on):
+    """Flat list of (text, item) rows; item is a selectable dict, "header", or None.
+
+    `pane_progress` maps pane id -> (pb_state, pb_progress) for OSC 9;4;
+    `pane_status` maps pane id -> hook turn status ("attention"/"working") so a
+    window-tree pane running an agent mirrors that agent's ◐/● glyph. hook_on /
+    osc_on gate the two indicator sources (see progress_indicator).
+    """
     rows = [(" WINDOWS", "header"), ("", None)]
     for w in windows:
         marker = "*" if w["active"] else " "
@@ -498,9 +564,13 @@ def build_rows(windows, sessions):
         for i, p in enumerate(w["panes"]):
             branch = "└─" if i == last else "├─"
             active = "*" if p["active"] else " "
+            indicator, indicator_color = progress_indicator(
+                pane_status.get(p["id"], ""), p["pb_state"], p["pb_progress"], hook_on, osc_on
+            )
             rows.append(
                 (f"   {branch}{active}{p['index']}: {p['title']}",
-                 {"kind": "pane", "key": ("p", p["id"]), "win": w, "pane": p["id"]})
+                 {"kind": "pane", "key": ("p", p["id"]), "win": w, "pane": p["id"],
+                  "indicator": indicator, "indicator_color": indicator_color})
             )
     for agent in sorted({s["agent"] for s in sessions}):
         rows.append(("", None))
@@ -517,12 +587,12 @@ def build_rows(windows, sessions):
                 (f"{marker} {w['index']}: {w['name']}",
                  {"kind": "window", "key": ("w", agent, w["id"]), "win": w})
             )
-            _append_agent_rows(rows, group, w)
+            _append_agent_rows(rows, group, w, pane_progress, hook_on, osc_on)
         # Pane-less sessions collect under a non-selectable "Agents" heading.
         detached = [s for s in agent_sessions if s["window"] is None]
         if detached:
             rows.append(("  Agents", None))
-            _append_agent_rows(rows, detached, None)
+            _append_agent_rows(rows, detached, None, pane_progress, hook_on, osc_on)
     return rows
 
 
@@ -571,7 +641,7 @@ def init_agent_colors():
     """Allocate a curses color pair per Claude color name for agent rows, matched
     to the user's theme: the theme's RGB mapped to the same xterm-256 index
     Claude uses (see _rgb_to_ansi256) on a 256-color terminal, else the base ANSI
-    color. Pairs 1-3 are taken by the base UI colors, so these start at 10."""
+    color. Pairs 1-4 are taken by the base UI colors, so these start at 10."""
     rgb = _theme_palette(read_theme()) if curses.COLORS >= 256 else None
     pair_id = 10
     for cname in _AGENT_COLOR_NAMES:
@@ -609,7 +679,7 @@ def draw(stdscr, rows, selected_key, offset, has_focus):
                 # Color the whole row in the agent's own assigned color (Claude's
                 # /color or the teammate's team color), falling back to the
                 # default agent color when none is known. Turn state is carried
-                # by the pinned glyph (●/◐) and bold, so it survives here.
+                # by the pinned indicator (●/◐) and bold, so it survives here.
                 pair = _agent_color_pairs.get(item.get("color") or "")
                 attr = curses.color_pair(pair if pair else 2)
                 if item["status"] in ("attention", "working"):
@@ -621,17 +691,31 @@ def draw(stdscr, rows, selected_key, offset, has_focus):
         else:
             attr = curses.A_DIM
         field = width - 1
-        glyph = item.get("glyph", "") if isinstance(item, dict) else ""
-        if glyph and field >= 3:
-            # Reserve the last two columns for a space + the glyph, so it stays
-            # visible in the rightmost cell however narrow the pane gets.
-            line = f"{_fit(text, field - 2)} {glyph}"
+        selected = has_focus and isinstance(item, dict) and item["key"] == selected_key
+        indicator = item.get("indicator", "") if isinstance(item, dict) else ""
+        # Reserve a space plus the indicator's own width at the right edge, so it
+        # stays visible in the rightmost cells however narrow the pane gets. The
+        # indicator gets its own attribute (an OSC state color), keeping the
+        # selection bar (reverse video) continuous across the whole row.
+        reserve = len(indicator) + 1
+        if indicator and field >= reserve + 1:
+            try:
+                stdscr.addnstr(screen_y, 0, _fit(text, field - reserve), field - reserve, attr)
+            except curses.error:
+                pass
+            color = item.get("indicator_color")
+            ind_attr = curses.color_pair(_INDICATOR_PAIRS[color]) if color else attr
+            if selected:
+                ind_attr |= curses.A_REVERSE
+            try:
+                stdscr.addnstr(screen_y, field - reserve, f" {indicator}", reserve, ind_attr)
+            except curses.error:
+                pass
         else:
-            line = _fit(text, field)
-        try:
-            stdscr.addnstr(screen_y, 0, line, field, attr)
-        except curses.error:
-            pass
+            try:
+                stdscr.addnstr(screen_y, 0, _fit(text, field), field, attr)
+            except curses.error:
+                pass
     stdscr.refresh()
     return offset
 
@@ -666,6 +750,7 @@ def main(stdscr):
     curses.init_pair(1, curses.COLOR_GREEN, -1)
     curses.init_pair(2, curses.COLOR_CYAN, -1)
     curses.init_pair(3, curses.COLOR_YELLOW, -1)
+    curses.init_pair(4, curses.COLOR_RED, -1)
     init_agent_colors()
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
     curses.mouseinterval(0)
@@ -685,7 +770,7 @@ def main(stdscr):
     relayout_grace = 0
 
     while True:
-        windows, pane_to_window, sidebars, pane_paths, sidebar_active = fetch_windows()
+        windows, pane_to_window, sidebars, pane_paths, pane_progress, sidebar_active = fetch_windows()
         if not windows:
             return
         me = pane_to_window.get(SIDEBAR_PANE)
@@ -752,7 +837,15 @@ def main(stdscr):
         # there has its attention dot cleared.
         focused_panes = {p["id"] for w in windows if w["active"] for p in w["panes"] if p["active"]}
         sessions = fetch_agent_sessions(pane_to_window, focused_panes, pane_paths)
-        rows = build_rows(windows, sessions)
+        # Mirror each pane's agent turn-state into the window tree: attention
+        # wins over working, matching fetch_agent_sessions' own precedence.
+        pane_status = {}
+        for s in sessions:
+            if s["pane"] and (s["status"] == "attention" or (s["status"] == "working" and pane_status.get(s["pane"]) != "attention")):
+                pane_status[s["pane"]] = s["status"]
+        hook_on = hook_progress_enabled()
+        osc_on = osc_progress_enabled()
+        rows = build_rows(windows, sessions, pane_progress, pane_status, hook_on, osc_on)
         items = [item for _, item in rows if isinstance(item, dict)]
         keys = [item["key"] for item in items]
         if selected_key not in keys:

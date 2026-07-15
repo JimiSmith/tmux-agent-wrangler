@@ -228,6 +228,8 @@ set -g @wrangler-sync-width on # resizing one sidebar resizes them all ('off' to
 set -g @wrangler-auto-install-hooks off # install agent hooks on plugin load ('on' to enable)
 set -g @wrangler-bell off      # ring the terminal bell when an agent needs attention ('on' to enable)
 set -g @wrangler-label name    # agent row label: 'name' (session title, default) | 'dir' (working-dir basename)
+set -g @wrangler-hook-progress on  # ◐/● working/attention indicators from agent hooks ('off' to disable)
+set -g @wrangler-osc-progress off  # OSC 9;4 progress % reported by panes ('on' to enable)
 ```
 
 `@wrangler-label name` shows each agent session's own title (Claude Code's
@@ -248,6 +250,22 @@ xterm-256 index Claude itself emits (Claude renders these colors as 256-color
 indices, so the row matches exactly rather than approximately); the ANSI themes
 and non-256-color terminals fall back to the base terminal colors. Turn state
 stays legible through the `◐`/`●` glyph.
+
+The sidebar pins a progress indicator to the right edge of each row, from two
+independent sources you can toggle separately:
+
+- `@wrangler-hook-progress` (default on) draws the hook-driven turn state:
+  `◐` while an agent is working, `●` once it wants attention. These come from
+  the agent hooks (see [Agent sessions](#agent-sessions)).
+- `@wrangler-osc-progress` (default off) draws an app's OSC 9;4 progress report
+  as a percentage colored by state (`normal` green, `paused` yellow, `error`
+  red, `indeterminate` `◐`; `hidden` shows nothing). It reads tmux's
+  `#{pane_pb_progress}` / `#{pane_pb_state}`, so it needs a tmux new enough to
+  expose them; on an older tmux enabling it is a harmless no-op.
+
+Both indicators appear in the window tree (per pane) and the agents section.
+When both are enabled, OSC wins for any pane actively reporting progress; a pane
+with no OSC progress falls back to its `◐`/`●` hook glyph.
 
 For the selection highlight to follow focus the moment it changes rather than
 on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:

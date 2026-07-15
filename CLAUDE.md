@@ -87,6 +87,18 @@ independent instances behaving as one.
   - **Shared selection**: the highlighted row is written to / read from the
     `selection` file every tick, so all sidebars highlight the same logical
     row and Enter/click on any of them focuses the same target.
+  - **Progress indicators** (`progress_indicator`): a single glyph/percentage
+    pinned to each row's right edge, from two independently-toggled sources.
+    `@wrangler-hook-progress` (default on) draws the hook turn state (`◐`
+    working / `●` attention). `@wrangler-osc-progress` (default off) draws an
+    app's OSC 9;4 report as a state-colored percentage, read from the
+    `#{pane_pb_state}` / `#{pane_pb_progress}` pane vars in `fetch_windows`
+    (empty on a tmux too old to know them, so it degrades to a no-op). OSC wins
+    when a pane reports an active state (tmux 3.7 uses `hidden` for none, and
+    names OSC state 4 `paused`), else the hook glyph. Both render in
+    the window tree (per pane, keyed off `pane_progress` / `pane_status`) and
+    the agents section. `draw()` gives the indicator its own color pair (green/
+    yellow/red per state) so it stands out from the row's own color.
   - **Width sync** (`@wrangler-sync-width`, `@wrangler-min-width`): the
     trickiest code. It distinguishes a *user* resize (clamp to the floor,
     publish to the `width` file for other sidebars to adopt) from tmux
