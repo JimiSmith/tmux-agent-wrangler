@@ -9,6 +9,8 @@
 # camelCase). Exits silently outside tmux.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agent-wrangler"
 REGISTRY="$STATE/sessions"
 ATTENTION="$STATE/attention"
@@ -46,6 +48,43 @@ ring_bell() {
   [ -n "$pane" ] || return 0
   tty="$(tmux display-message -p -t "$pane" '#{pane_tty}' 2>/dev/null)" || return 0
   [ -n "$tty" ] && printf '\a' > "$tty" 2>/dev/null || true
+}
+
+# Raise an OSC 9 desktop notification (the ConEmu/iTerm2 toast escape) in the
+# session's terminal, gated on @wrangler-osc-notify (off by default). The body
+# reads exactly as the sidebar row does: "<window index>: <window> · <label>",
+# where the label comes from the shared session_labels module so it matches the
+# sidebar's rendering (title / teammate @name / dir fallback).
+#
+# Unlike the bell, this writes to each attached client's tty, not the pane's:
+# tmux 3.7 consumes a pane's OSC 9 into its own OSC 9;4 progress parser, so a
+# notification sent through the pane would be swallowed. Writing to the client
+# tty reaches the terminal emulator directly (and so notifies whatever window is
+# focused). Best-effort: never fail the hook over a notification.
+notify_osc9() {
+  case "$(tmux show-option -gqv @wrangler-osc-notify 2>/dev/null)" in
+    on|1|yes|true) ;;
+    *) return 0 ;;
+  esac
+  local pane cwd transcript display_cwd label_opt win_heading label body session
+  pane="$(cut -f1 "$REGISTRY/$agent-$session_id" 2>/dev/null)" || return 0
+  [ -n "$pane" ] || return 0
+  cwd="$(printf '%s' "$parsed" | sed -n 2p)"
+  transcript="$(printf '%s' "$parsed" | sed -n 3p)"
+  win_heading="$(tmux display-message -p -t "$pane" '#{window_index}: #{window_name}' 2>/dev/null)" || return 0
+  display_cwd="$(tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null)"
+  display_cwd="${display_cwd:-$cwd}"
+  label_opt="$(tmux show-option -gqv @wrangler-label 2>/dev/null)"
+  label="$(PYTHONPATH="$SCRIPT_DIR" python3 -c 'import sys, session_labels; print(session_labels.notification_label(sys.argv[1], sys.argv[2], sys.argv[3]))' "$transcript" "$display_cwd" "$label_opt" 2>/dev/null)"
+  if [ -n "$label" ]; then
+    body="$win_heading · $label"
+  else
+    body="$win_heading"
+  fi
+  session="$(tmux display-message -p -t "$pane" '#{session_name}' 2>/dev/null)" || return 0
+  tmux list-clients -t "$session" -F '#{client_tty}' 2>/dev/null | while read -r ctty; do
+    [ -n "$ctty" ] && printf '\033]9;%s\007' "$body" > "$ctty" 2>/dev/null || true
+  done
 }
 
 # Write (or overwrite) this session's registry record, keyed on session_id. The
@@ -120,9 +159,13 @@ if [ "$event" = "needsAttention" ]; then
   ensure_registered
   [ -f "$REGISTRY/$agent-$session_id" ] || exit 0
   mkdir -p "$ATTENTION"
-  # Ring only on the transition into attention: if the marker already exists
-  # the session was flagged, so a repeat event stays silent.
-  [ -f "$ATTENTION/$agent-$session_id" ] || ring_bell
+  # Signal only on the transition into attention: if the marker already exists
+  # the session was flagged, so a repeat event stays silent. The bell and the
+  # OSC 9 notification are gated independently (see each function).
+  if [ ! -f "$ATTENTION/$agent-$session_id" ]; then
+    ring_bell
+    notify_osc9
+  fi
   : > "$ATTENTION/$agent-$session_id"
   rm -f "$WORKING/$agent-$session_id"
   exit 0

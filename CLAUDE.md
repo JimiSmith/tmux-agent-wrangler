@@ -135,7 +135,25 @@ independent instances behaving as one.
   sidebar renders `◐` for working and `●` for attention, and deletes the
   attention marker once its pane is focused (the working marker persists until
   the turn ends). `sidebar.py` prunes any registry entry (and both markers)
-  whose pane is gone or whose PID is dead.
+  whose pane is gone or whose PID is dead. On the transition *into* attention
+  (only when the marker did not already exist) two independently-gated signals
+  fire: `ring_bell` (`@wrangler-bell`, writes BEL to the pane tty so tmux applies
+  its own bell handling) and `notify_osc9` (`@wrangler-osc-notify`, an OSC 9
+  desktop-notification escape). The notification body is built from the shared
+  `session_labels.notification_label`, so it matches the sidebar row exactly, and
+  is written to each attached client's tty rather than the pane's — tmux 3.7
+  consumes a pane's OSC 9 into its OSC 9;4 progress parser, so a pane-routed
+  notification would be swallowed. Both are best-effort and no-ops for a paneless
+  session.
+
+- **`scripts/session_labels.py`** — the agent-row label logic shared by
+  `sidebar.py` (rendering rows) and `agent-hook.sh` (building the OSC 9
+  notification body), so the two never drift. Holds `session_meta` (reads the
+  session title / teammate `@name` / `/color` from the transcript tail),
+  `agent_label` (composes the row text from mode/title/agent/dir), `label_mode_from`
+  (the `@wrangler-label` `dir`-else-`name` rule), and `notification_label` (the
+  convenience the hook calls). Stdlib-only (json/os) so importing it from the hook
+  pulls in no curses and needs no `TMUX_PANE`.
 
 - **`scripts/install-hooks.py`** — installs (or `--uninstall`s) the
   `agent-hook.sh` invocations into each agent's config so users need not hand-edit

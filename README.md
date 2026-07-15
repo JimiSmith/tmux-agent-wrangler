@@ -230,6 +230,7 @@ set -g @wrangler-bell off      # ring the terminal bell when an agent needs atte
 set -g @wrangler-label name    # agent row label: 'name' (session title, default) | 'dir' (working-dir basename)
 set -g @wrangler-hook-progress on  # ◐/● working/attention indicators from agent hooks ('off' to disable)
 set -g @wrangler-osc-progress off  # OSC 9;4 progress % reported by panes ('on' to enable)
+set -g @wrangler-osc-notify off    # OSC 9 desktop notification when an agent needs attention ('on' to enable)
 ```
 
 `@wrangler-label name` shows each agent session's own title (Claude Code's
@@ -267,7 +268,13 @@ Both indicators appear in the window tree (per pane) and the agents section.
 When both are enabled, OSC wins for any pane actively reporting progress; a pane
 with no OSC progress falls back to its `◐`/`●` hook glyph.
 
-For the selection highlight to follow focus the moment it changes rather than
+`@wrangler-osc-notify` (default off) raises an OSC 9 desktop notification the
+moment an agent needs attention — the same instant `@wrangler-bell` rings, and
+gated independently of it. Its body reads exactly as the sidebar row does,
+`<window index>: <window> · <label>` (e.g. `1: vim · api-service`). The escape is
+sent to the terminal itself rather than through tmux, so the notification arrives
+whatever window you are on; it needs a terminal that understands OSC 9
+notifications (ConEmu/iTerm2 and compatibles), and is silently ignored by others.
 on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:
 
 ```tmux
