@@ -230,7 +230,7 @@ set -g @wrangler-bell off      # ring the terminal bell when an agent needs atte
 set -g @wrangler-label name    # agent row label: 'name' (session title, default) | 'dir' (working-dir basename)
 set -g @wrangler-hook-progress on  # ◐/● working/attention indicators from agent hooks ('off' to disable)
 set -g @wrangler-osc-progress off  # OSC 9;4 progress % reported by panes ('on' to enable)
-set -g @wrangler-osc-notify off    # OSC 9 desktop notification when an agent needs attention ('on' to enable)
+set -g @wrangler-osc-notify off    # desktop notification when an agent needs attention: 'off' | '777' (or 'on') | '9'
 ```
 
 `@wrangler-label name` shows each agent session's own title (Claude Code's
@@ -268,14 +268,17 @@ Both indicators appear in the window tree (per pane) and the agents section.
 When both are enabled, OSC wins for any pane actively reporting progress; a pane
 with no OSC progress falls back to its `◐`/`●` hook glyph.
 
-`@wrangler-osc-notify` (default off) raises an OSC 9 desktop notification the
-moment an agent needs attention — the same instant `@wrangler-bell` rings, and
-gated independently of it. Its body is `<window> · <label>` (e.g.
-`vim · api-service`), the window name and the row label as the sidebar shows
-them. The escape is
+`@wrangler-osc-notify` (default off) raises a desktop notification the moment an
+agent needs attention — the same instant `@wrangler-bell` rings, and gated
+independently of it. Set it to `777` (or `on`) for an OSC 777 notification (the
+agent name as the title, `<window> · <label>` as the body) or `9` for an OSC 9
+notification (`<window> · <label>` as the single message); `off` disables it.
+Pick the escape your terminal understands — OSC 777 (rxvt-unicode, foot, ...) or
+OSC 9 (ConEmu, iTerm2, ...); a terminal that does not understand the chosen one
+silently ignores it. Either way `<window>` / `<label>` are the window name and
+the row label as the sidebar shows them (e.g. `vim · api-service`). The escape is
 sent to the terminal itself rather than through tmux, so the notification arrives
-whatever window you are on; it needs a terminal that understands OSC 9
-notifications (ConEmu/iTerm2 and compatibles), and is silently ignored by others.
+whatever window you are on.
 on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:
 
 ```tmux

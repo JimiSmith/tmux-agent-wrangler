@@ -138,9 +138,10 @@ independent instances behaving as one.
   whose pane is gone or whose PID is dead. On the transition *into* attention
   (only when the marker did not already exist) two independently-gated signals
   fire: `ring_bell` (`@wrangler-bell`, writes BEL to the pane tty so tmux applies
-  its own bell handling) and `notify_osc9` (`@wrangler-osc-notify`, an OSC 9
-  desktop-notification escape). The notification body is built from the shared
-  `session_labels.notification_label`, so it matches the sidebar row exactly, and
+  its own bell handling) and `notify_osc` (`@wrangler-osc-notify`: `off` default,
+  `777`/`on` → an OSC 777 notify escape with the agent name as its title, `9` →
+  an OSC 9 escape). The notification text (`<window> · <label>`) is built from the
+  shared `session_labels.notification_label`, so it matches the sidebar row, and
   is written to each attached client's tty rather than the pane's — tmux 3.7
   consumes a pane's OSC 9 into its OSC 9;4 progress parser, so a pane-routed
   notification would be swallowed. Both are best-effort and no-ops for a paneless

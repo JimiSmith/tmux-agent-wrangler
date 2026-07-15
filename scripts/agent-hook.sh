@@ -50,23 +50,26 @@ ring_bell() {
   [ -n "$tty" ] && printf '\a' > "$tty" 2>/dev/null || true
 }
 
-# Raise an OSC 9 desktop notification (the ConEmu/iTerm2 toast escape) in the
-# session's terminal, gated on @wrangler-osc-notify (off by default). The body
-# reads "<window> · <label>", where the window name and the label match the
-# sidebar's rendering (the label comes from the shared session_labels module -
-# title / teammate @name / dir fallback).
+# Raise a desktop notification (an OSC escape the terminal turns into a toast)
+# in the session's terminal when an agent needs attention, selected by
+# @wrangler-osc-notify: off (default), 777/on -> OSC 777, 9 -> OSC 9. Both carry
+# the text "<window> · <label>" (the window name and the row label from the
+# shared session_labels module, matching the sidebar); OSC 777 also puts the
+# agent name in its title field (OSC 9 has only the one string).
 #
 # Unlike the bell, this writes to each attached client's tty, not the pane's:
 # tmux 3.7 consumes a pane's OSC 9 into its own OSC 9;4 progress parser, so a
 # notification sent through the pane would be swallowed. Writing to the client
 # tty reaches the terminal emulator directly (and so notifies whatever window is
 # focused). Best-effort: never fail the hook over a notification.
-notify_osc9() {
+notify_osc() {
+  local proto
   case "$(tmux show-option -gqv @wrangler-osc-notify 2>/dev/null)" in
-    on|1|yes|true) ;;
+    777|on|1|yes|true) proto=777 ;;
+    9) proto=9 ;;
     *) return 0 ;;
   esac
-  local pane cwd transcript display_cwd label_opt win_name label body session
+  local pane cwd transcript display_cwd label_opt win_name label text esc session
   pane="$(cut -f1 "$REGISTRY/$agent-$session_id" 2>/dev/null)" || return 0
   [ -n "$pane" ] || return 0
   cwd="$(printf '%s' "$parsed" | sed -n 2p)"
@@ -77,13 +80,20 @@ notify_osc9() {
   label_opt="$(tmux show-option -gqv @wrangler-label 2>/dev/null)"
   label="$(PYTHONPATH="$SCRIPT_DIR" python3 -c 'import sys, session_labels; print(session_labels.notification_label(sys.argv[1], sys.argv[2], sys.argv[3]))' "$transcript" "$display_cwd" "$label_opt" 2>/dev/null)"
   if [ -n "$label" ]; then
-    body="$win_name · $label"
+    text="$win_name · $label"
   else
-    body="$win_name"
+    text="$win_name"
+  fi
+  # OSC 9 is a single message; OSC 777 (notify) takes a title (the agent name)
+  # and a body. Both terminated with BEL.
+  if [ "$proto" = 777 ]; then
+    esc="$(printf '\033]777;notify;%s;%s\007' "$agent" "$text")"
+  else
+    esc="$(printf '\033]9;%s\007' "$text")"
   fi
   session="$(tmux display-message -p -t "$pane" '#{session_name}' 2>/dev/null)" || return 0
   tmux list-clients -t "$session" -F '#{client_tty}' 2>/dev/null | while read -r ctty; do
-    [ -n "$ctty" ] && printf '\033]9;%s\007' "$body" > "$ctty" 2>/dev/null || true
+    [ -n "$ctty" ] && printf '%s' "$esc" > "$ctty" 2>/dev/null || true
   done
 }
 
@@ -164,7 +174,7 @@ if [ "$event" = "needsAttention" ]; then
   # OSC 9 notification are gated independently (see each function).
   if [ ! -f "$ATTENTION/$agent-$session_id" ]; then
     ring_bell
-    notify_osc9
+    notify_osc
   fi
   : > "$ATTENTION/$agent-$session_id"
   rm -f "$WORKING/$agent-$session_id"
