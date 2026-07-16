@@ -135,13 +135,38 @@ register_session() {
   printf '%s\t%s\t%s\t%s\t%s\n' "${TMUX_PANE:-}" "$agent" "$agent_pid" "${cwd:-$PWD}" "$transcript" > "$REGISTRY/$agent-$session_id"
 }
 
-# Register only when the record is missing, so the per-event work stays cheap
-# (the ancestry walk runs once per session, not on every high-frequency event).
-# This makes every event self-healing: a session whose `start` was missed (e.g.
-# a resumed Claude Code session, where SessionStart does not re-register it)
-# reappears in the sidebar as soon as any other hook fires.
+# Refresh an existing record's cwd/transcript in place when the current event
+# reports a transcript path different from the stored one, preserving pane and
+# pid (so we skip the ancestry walk). A session that relocates mid-life - most
+# visibly one that enters a worktree, moving its cwd and so relocating its
+# transcript to a new project dir under the same session id - would otherwise
+# keep the stale path forever (turn events never re-register), and the sidebar
+# reads the title and /color from that transcript, so both would go missing.
+refresh_record() {
+  local cwd transcript old_pane old_agent old_pid old_cwd old_transcript
+  transcript="$(printf '%s' "$parsed" | sed -n 3p)"
+  [ -n "$transcript" ] || return 0  # no transcript in payload: nothing to refresh
+  IFS=$'\t' read -r old_pane old_agent old_pid old_cwd old_transcript \
+    < "$REGISTRY/$agent-$session_id" || return 0
+  [ "$transcript" = "$old_transcript" ] && return 0  # unchanged: leave it be
+  cwd="$(printf '%s' "$parsed" | sed -n 2p)"
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    "$old_pane" "$old_agent" "$old_pid" "${cwd:-$old_cwd}" "$transcript" \
+    > "$REGISTRY/$agent-$session_id"
+}
+
+# Register when the record is missing, else refresh a relocated transcript. The
+# ancestry walk runs once per session (at registration), not on every
+# high-frequency event. This makes every event self-healing: a session whose
+# `start` was missed (e.g. a resumed Claude Code session, where SessionStart
+# does not re-register it) reappears in the sidebar as soon as any other hook
+# fires, and one that moved its transcript picks up the new path.
 ensure_registered() {
-  [ -f "$REGISTRY/$agent-$session_id" ] || register_session
+  if [ -f "$REGISTRY/$agent-$session_id" ]; then
+    refresh_record
+  else
+    register_session
+  fi
 }
 
 if [ "$event" = "end" ]; then
