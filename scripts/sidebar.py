@@ -216,6 +216,20 @@ def write_width(width):
         pass
 
 
+def strip_status_prefix(title):
+    """Drop the status glyph Claude Code prefixes onto the terminal/pane title.
+
+    Claude sets the pane title to "<glyph> <session title>" - a spinner frame
+    (braille) while working, `✳` when idle; the glyph is always a single
+    non-alphanumeric token. Split on the first space and drop that first token
+    when it holds no alphanumeric character, so the glyph goes but a real title
+    (which starts with a word) is kept intact. Returns the remainder stripped."""
+    head, sep, rest = title.strip().partition(" ")
+    if sep and not any(c.isalnum() for c in head):
+        return rest.strip()
+    return title.strip()
+
+
 def fetch_windows():
     windows = []
     for line in tmux(
@@ -228,6 +242,7 @@ def fetch_windows():
     pane_to_window = {}
     pane_paths = {}
     pane_progress = {}
+    pane_titles = {}
     sidebars = set()
     sidebar_active = False
     # The OSC 9;4 pane vars (pb_state / pb_progress) are fixed enum/number
@@ -251,11 +266,15 @@ def fetch_windows():
             if pid == SIDEBAR_PANE:
                 sidebar_active = active == "1"
             continue
+        # A real pane's title is the session title Claude sets on it (minus its
+        # status glyph); fetch_agent_sessions matches it to associate a
+        # daemon-hosted session with the pane(s) currently displaying it.
+        pane_titles[pid] = strip_status_prefix(title)
         by_id[wid]["panes"].append(
             {"id": pid, "index": index, "active": active == "1", "title": title,
              "pb_state": pb_state, "pb_progress": progress}
         )
-    return windows, pane_to_window, sidebars, pane_paths, pane_progress, sidebar_active
+    return windows, pane_to_window, sidebars, pane_paths, pane_progress, pane_titles, sidebar_active
 
 
 def pid_alive(pid):
@@ -268,18 +287,27 @@ def pid_alive(pid):
     return True
 
 
-def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
-    """Read the hook registry; prune entries whose pane or process is gone.
+def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles):
+    """Read the hook registry; prune dead entries and file each session under
+    the window(s) of the pane(s) currently displaying it.
 
     A session carries a turn status set by agent-hook.sh: "working" while a
     turn is in progress, "attention" once it finishes a turn or notifies. The
-    attention marker (and so the dot) clears once the session's pane is the
-    focused pane, meaning "wanted attention while you were not looking at it";
-    the working marker persists until the turn ends, since it reflects the
+    attention marker (and so the dot) clears once any pane showing the session
+    is the focused pane, meaning "wanted attention while you were not looking at
+    it"; the working marker persists until the turn ends, since it reflects the
     agent actually being busy.
 
-    The displayed cwd tracks the pane's live path (pane_paths) so it follows
-    the agent as it changes directory, falling back to the cwd recorded at
+    A daemon-hosted session registers with no pane (no TMUX_PANE at hook time),
+    so it is associated by matching its title (session_meta) against each pane's
+    live title (pane_titles). Claude Code sets the pane title to the session
+    title however the session is viewed - `claude attach`, `--resume`, or the
+    agents view - so a title match means that pane is displaying the session. A
+    session shown in several panes yields one placement per pane (listed under
+    each window); one shown nowhere stays detached under "Agents".
+
+    The displayed cwd tracks the pane's live path (pane_paths) so it follows the
+    agent as it changes directory, falling back to the cwd recorded at
     registration if the pane reports no path.
     """
     try:
@@ -290,7 +318,10 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
     # Every pane id on the tmux server (all sessions), so a record whose pane
     # lives in another session can be told apart from one whose pane is gone.
     all_panes = set(tmux("list-panes", "-a", "-F", "#{pane_id}").split())
-    sessions = []
+
+    # Pass 1: parse and prune records, resolving each surviving one's identity
+    # and title (the string matched against pane titles below).
+    candidates = []
     for name in names:
         path = os.path.join(REGISTRY, name)
         attn_marker = os.path.join(ATTENTION, name)
@@ -322,41 +353,79 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths):
         if pid.isdigit() and not pid_alive(int(pid)):
             prune()
             continue
-        # A recorded pane is optional. Empty means a pane-less session (no
-        # TMUX_PANE at hook time, e.g. a daemon-hosted Claude Code session): it
-        # maps to no window and shows under the "Agents" group. A pane that this
-        # sidebar's session does not own is handled by session scope, not here.
-        window = pane_to_window.get(pane) if pane else None
-        if pane and window is None:
-            # The pane is not in this sidebar's tmux session. If it still exists
-            # it belongs to another session, whose own sidebar lists it, so we
-            # skip it here rather than misfiling it under "Agents". If it exists
-            # nowhere the pane is gone: prune the record when no live PID vouches
-            # for it (legacy / failed capture), otherwise just hide it here.
-            if pane not in all_panes and not pid.isdigit():
-                prune()
+        # A recorded pane not in this tmux session: if it exists nowhere and no
+        # live PID vouches for it (legacy / failed capture), the record is stale
+        # - prune it. Otherwise it belongs to another session (whose own sidebar
+        # lists it) or is unverifiable, so it just is not a local pane here.
+        if pane and pane not in pane_to_window and pane not in all_panes and not pid.isdigit():
+            prune()
             continue
-        attention = os.path.exists(attn_marker)
-        if attention and pane in focused_panes:
+        title, agent_name, team, color = session_meta(transcript)
+        candidates.append(
+            {"id": name, "agent": agent, "recorded_pane": pane, "cwd": cwd,
+             "title": title, "agent_name": agent_name, "team": team, "color": color,
+             "attn_marker": attn_marker, "work_marker": work_marker}
+        )
+
+    # Resolve which session owns each local pane by title: a pane showing
+    # exactly one session's title associates to it; a title shared by several
+    # sessions is broken by the recorded pane, then the cwd, and left unassigned
+    # if still ambiguous (better no jump than a wrong one). Empty titles never
+    # match.
+    pane_owner = {}
+    for pid, ptitle in pane_titles.items():
+        if not ptitle:
+            continue
+        matches = [c for c in candidates if c["title"] == ptitle]
+        if len(matches) == 1:
+            pane_owner[pid] = matches[0]["id"]
+        elif len(matches) > 1:
+            pool = [c for c in matches if c["recorded_pane"] == pid] or \
+                   [c for c in matches if c["cwd"] == pane_paths.get(pid)]
+            if len(pool) == 1:
+                pane_owner[pid] = pool[0]["id"]
+
+    # Pass 2: place each session under its matched pane(s), or detached.
+    sessions = []
+    for c in candidates:
+        matched = [c["recorded_pane"]] if c["recorded_pane"] in pane_to_window else []
+        for pid, owner in pane_owner.items():
+            if owner == c["id"] and pid not in matched:
+                matched.append(pid)
+
+        attention = os.path.exists(c["attn_marker"])
+        if attention and any(p in focused_panes for p in matched):
             try:
-                os.unlink(attn_marker)
+                os.unlink(c["attn_marker"])
             except OSError:
                 pass
             attention = False
-        status = "attention" if attention else ("working" if os.path.exists(work_marker) else "")
-        display_cwd = pane_paths.get(pane) or cwd
-        dir_name = os.path.basename(display_cwd.rstrip("/")) or display_cwd
-        title, agent_name, team, color = session_meta(transcript)
+        status = "attention" if attention else ("working" if os.path.exists(c["work_marker"]) else "")
         # A top-level session records its color in the transcript; a teammate's
         # lives in its team config instead, so fall back to that (by pane), read
         # only for actual teammates.
-        if not color and agent_name:
-            color = team_pane_colors(team).get(pane, "")
-        label = agent_label(mode, title, agent_name, dir_name)
-        sessions.append(
-            {"id": name, "agent": agent, "pane": pane, "cwd": display_cwd,
-             "label": label, "window": window, "status": status, "color": color}
-        )
+        team_colors = team_pane_colors(c["team"]) if (not c["color"] and c["agent_name"]) else {}
+
+        def place(pane, window):
+            display_cwd = pane_paths.get(pane) or c["cwd"]
+            dir_name = os.path.basename(display_cwd.rstrip("/")) or display_cwd
+            sessions.append(
+                {"id": c["id"], "agent": c["agent"], "pane": pane, "cwd": display_cwd,
+                 "label": agent_label(mode, c["title"], c["agent_name"], dir_name),
+                 "window": window, "status": status,
+                 "color": c["color"] or team_colors.get(pane, "")}
+            )
+
+        if not matched:
+            # A recorded pane that is not local means the session lives in
+            # another tmux session (listed by its own sidebar), not here; only a
+            # pane-less (daemon) session is genuinely detached under "Agents".
+            if c["recorded_pane"]:
+                continue
+            place("", None)
+            continue
+        for pid in matched:
+            place(pid, pane_to_window[pid])
     return sessions
 
 
@@ -439,7 +508,7 @@ def _append_agent_rows(rows, group, win, pane_progress, hook_on, osc_on, frame):
         # right edge so it survives a long title being truncated.
         rows.append(
             (f"   {branch} {s['label']}",
-             {"kind": "agent", "key": ("a", s["id"]), "win": win, "pane": s["pane"],
+             {"kind": "agent", "key": ("a", s["id"], s["pane"]), "win": win, "pane": s["pane"],
               "status": s["status"], "color": s["color"],
               "indicator": indicator, "indicator_color": indicator_color})
         )
@@ -685,7 +754,7 @@ def main(stdscr):
         if force_poll or cached is None or now - last_poll >= POLL_INTERVAL - 0.1:
             force_poll = False
             last_poll = now
-            windows, pane_to_window, sidebars, pane_paths, pane_progress, sidebar_active = fetch_windows()
+            windows, pane_to_window, sidebars, pane_paths, pane_progress, pane_titles, sidebar_active = fetch_windows()
             if not windows:
                 return
             me = pane_to_window.get(SIDEBAR_PANE)
@@ -751,7 +820,7 @@ def main(stdscr):
             # The focused pane is the active pane of the active window; a session
             # there has its attention dot cleared.
             focused_panes = {p["id"] for w in windows if w["active"] for p in w["panes"] if p["active"]}
-            sessions = fetch_agent_sessions(pane_to_window, focused_panes, pane_paths)
+            sessions = fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles)
             # Mirror each pane's agent turn-state into the window tree: attention
             # wins over working, matching fetch_agent_sessions' own precedence.
             pane_status = {}

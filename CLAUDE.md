@@ -86,7 +86,23 @@ independent instances behaving as one.
     key.
   - **Shared selection**: the highlighted row is written to / read from the
     `selection` file every tick, so all sidebars highlight the same logical
-    row and Enter/click on any of them focuses the same target.
+    row and Enter/click on any of them focuses the same target. An agent row's
+    selection key is `("a", session_id, pane)` — the pane is part of the key
+    because one session can be placed under several windows at once (see agent
+    association), and `main`'s nav/activate assume unique keys.
+  - **Agent association** (`fetch_agent_sessions`): a session's registry record
+    carries the pane captured at hook time, but a daemon-hosted (background)
+    session has none — no `TMUX_PANE` when its hook ran, and no process/env link
+    back to a pane. Such a session is associated by matching its title
+    (`session_meta`) against each pane's live title (`pane_titles` from
+    `fetch_windows`, glyph-stripped by `strip_status_prefix`): Claude Code sets
+    the pane title to the session title however the session is viewed (`claude
+    attach`, `--resume`, or the agents view), so a match means that pane is
+    displaying the session. A session is filed under the window of *every* pane
+    showing it (recorded-if-local ∪ title-matched), so it can appear under two
+    windows; one shown nowhere stays detached under "Agents". Title collisions
+    are broken by the recorded pane then the cwd, and left unassigned if still
+    ambiguous (better no jump than a wrong one); empty titles never match.
   - **Progress indicators** (`progress_indicator`): a single glyph/percentage
     pinned to each row's right edge, from two independently-toggled sources.
     `@wrangler-hook-progress` (default on) draws the hook turn state (an animated
