@@ -270,16 +270,23 @@ When both are enabled, OSC wins for any pane actively reporting progress; a pane
 with no OSC progress falls back to its spinner/`●` hook glyph.
 
 `@wrangler-osc-notify` (default off) raises a desktop notification the moment an
-agent needs attention — the same instant `@wrangler-bell` rings, and gated
-independently of it. Set it to `777` (or `on`) for an OSC 777 notification (the
-agent name as the title, `<window> · <label>` as the body) or `9` for an OSC 9
-notification (`<window> · <label>` as the single message); `off` disables it.
-Pick the escape your terminal understands — OSC 777 (rxvt-unicode, foot, ...) or
-OSC 9 (ConEmu, iTerm2, ...); a terminal that does not understand the chosen one
-silently ignores it. Either way `<window>` / `<label>` are the window name and
-the row label as the sidebar shows them (e.g. `vim · api-service`). The escape is
-sent to the terminal itself rather than through tmux, so the notification arrives
-whatever window you are on.
+agent needs attention, and `@wrangler-bell` (default off) rings the terminal bell
+at the same point; the two are independent. Set osc-notify to `777` (or `on`) for
+an OSC 777 notification (the agent name as the title, `<window> · <label>` as the
+body) or `9` for an OSC 9 notification (`<window> · <label>` as the single
+message); `off` disables it. Pick the escape your terminal understands: OSC 777
+(rxvt-unicode, foot, ...) or OSC 9 (ConEmu, iTerm2, ...); a terminal that does
+not understand the chosen one silently ignores it. Either way `<window>` /
+`<label>` are the window name and the row label as the sidebar shows them (e.g.
+`vim · api-service`), and the escape is sent to the terminal itself rather than
+through tmux, so the notification arrives whatever window you are on.
+
+Both signals are raised by the sidebar as it polls, so they need the sidebar
+toggled on, and — like the `●` indicator — they fire only when you are not
+already looking at that agent's pane (focusing it clears the pending attention
+instead).
+
+For the selection highlight to follow focus the moment it changes rather than
 on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:
 
 ```tmux

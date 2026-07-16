@@ -32,9 +32,10 @@ pane's stderr is visible, or temporarily wrap the loop.
 State lives under `$XDG_STATE_HOME/tmux-agent-wrangler` (default
 `~/.local/state/tmux-agent-wrangler`): `sessions/` (agent registry, one file
 per session), `attention/` and `working/` (turn-state markers, one file per
-session that mirrors its `sessions/` filename), `selection` (shared
-highlighted row), and `width` (shared sidebar width). Deleting this directory
-resets all cross-pane state.
+session that mirrors its `sessions/` filename), `notified/` (one flag per
+session id, the single-fire dedup for the bell/notification, see
+`notify_attention`), `selection` (shared highlighted row), and `width` (shared
+sidebar width). Deleting this directory resets all cross-pane state.
 
 ## Architecture
 
@@ -120,6 +121,20 @@ independent instances behaving as one.
     1s data poll — between polls it only re-runs `build_rows` on the cached poll
     data and repaints, and the fast timer engages only while a spinner is on
     screen, so an idle sidebar still just blocks for the poll interval.
+  - **Attention signals** (`notify_attention`): the bell (`@wrangler-bell`) and
+    the OSC desktop notification (`@wrangler-osc-notify`: `off` | `777`/`on` |
+    `9`) are raised here off the poll, not by the hook — reacting to the same
+    attention state as the `●` glyph, so a session whose pane is focused (marker
+    already cleared by `fetch_agent_sessions`) never fires. This is what lets a
+    daemon-hosted session signal at all: the hook has no pane for it, but the
+    sidebar resolves one via title matching. Because there is one sidebar per
+    window (and a session can sit under several windows), the fire is gated on an
+    atomic create of a `notified/<id>` flag, so exactly one sidebar signals per
+    episode; the flag is pruned once the attention marker is gone, rearming the
+    next. The notification (built as `<window> · <label>`, OSC 777 also carrying
+    the agent name as its title) goes to each client tty of this tmux session; the
+    bell writes BEL to the matched pane's tty. With the sidebar off, nothing
+    signals.
   - **Width sync** (`@wrangler-sync-width`, `@wrangler-min-width`): the
     trickiest code. It distinguishes a *user* resize (clamp to the floor,
     publish to the `width` file for other sidebars to adopt) from tmux
@@ -156,26 +171,18 @@ independent instances behaving as one.
   sidebar renders an animated spinner for working and `●` for attention, and deletes the
   attention marker once its pane is focused (the working marker persists until
   the turn ends). `sidebar.py` prunes any registry entry (and both markers)
-  whose pane is gone or whose PID is dead. On the transition *into* attention
-  (only when the marker did not already exist) two independently-gated signals
-  fire: `ring_bell` (`@wrangler-bell`, writes BEL to the pane tty so tmux applies
-  its own bell handling) and `notify_osc` (`@wrangler-osc-notify`: `off` default,
-  `777`/`on` → an OSC 777 notify escape with the agent name as its title, `9` →
-  an OSC 9 escape). The notification text (`<window> · <label>`) is built from the
-  shared `session_labels.notification_label`, so it matches the sidebar row, and
-  is written to each attached client's tty rather than the pane's — tmux 3.7
-  consumes a pane's OSC 9 into its OSC 9;4 progress parser, so a pane-routed
-  notification would be swallowed. Both are best-effort and no-ops for a paneless
+  whose pane is gone or whose PID is dead. The hook does *not* fire the bell or
+  the desktop notification: it only writes the attention marker. The sidebar
+  reacts to that marker (see `notify_attention` in the `sidebar.py` bullet),
+  because it, not the hook, can locate the pane displaying a daemon-hosted
   session.
 
-- **`scripts/session_labels.py`** — the agent-row label logic shared by
-  `sidebar.py` (rendering rows) and `agent-hook.sh` (building the OSC 9
-  notification body), so the two never drift. Holds `session_meta` (reads the
-  session title / teammate `@name` / `/color` from the transcript tail),
-  `agent_label` (composes the row text from mode/title/agent/dir), `label_mode_from`
-  (the `@wrangler-label` `dir`-else-`name` rule), and `notification_label` (the
-  convenience the hook calls). Stdlib-only (json/os) so importing it from the hook
-  pulls in no curses and needs no `TMUX_PANE`.
+- **`scripts/session_labels.py`** — `sidebar.py`'s agent-row label logic, kept in
+  its own module so the transcript-scanning stays isolated and testable. Holds
+  `session_meta` (reads the session title / teammate `@name` / `/color` from the
+  transcript tail), `agent_label` (composes the row text from mode/title/agent/dir),
+  and `label_mode_from` (the `@wrangler-label` `dir`-else-`name` rule). Stdlib-only
+  (json/os), no curses, no `TMUX_PANE`.
 
 - **`scripts/install-hooks.py`** — installs (or `--uninstall`s) the
   `agent-hook.sh` invocations into each agent's config so users need not hand-edit

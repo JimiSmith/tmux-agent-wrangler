@@ -1,10 +1,9 @@
-"""Shared agent-session label logic.
+"""Agent-session label logic for scripts/sidebar.py.
 
-Imported by both scripts/sidebar.py (to render the agent rows) and
-scripts/agent-hook.sh (to build the OSC 9 notification body via `python3 -c`),
-so the notification text matches the sidebar row exactly. Depends only on the
-stdlib (json/os) - no curses, no TMUX_PANE - so it is cheap and side-effect-free
-to import from the hook.
+Reads a session's title / teammate identity / color from its transcript
+(session_meta) and composes the agent-row label (agent_label). Kept in its own
+stdlib-only module (no curses, no TMUX_PANE) rather than inline in sidebar.py so
+the transcript-scanning logic stays isolated and testable.
 """
 import json
 import os
@@ -144,12 +143,3 @@ def agent_label(mode, title, agent_name, dir_name):
         tail = title if mode == "name" else dir_name
         return f"@{agent_name} - {tail}" if tail else f"@{agent_name}"
     return (title if mode == "name" else "") or dir_name
-
-
-def notification_label(transcript, display_cwd, label_opt):
-    """The agent-row label for a session, as shown on screen, for the OSC 9
-    notification body. `label_opt` is the raw @wrangler-label value (the hook
-    forwards it without interpreting it)."""
-    dir_name = os.path.basename(display_cwd.rstrip("/")) or display_cwd
-    title, agent_name, _team, _color = session_meta(transcript)
-    return agent_label(label_mode_from(label_opt), title, agent_name, dir_name)

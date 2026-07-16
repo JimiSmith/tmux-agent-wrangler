@@ -33,6 +33,10 @@ STATE_DIR = os.path.join(
 REGISTRY = os.path.join(STATE_DIR, "sessions")
 ATTENTION = os.path.join(STATE_DIR, "attention")
 WORKING = os.path.join(STATE_DIR, "working")
+# One flag file per session id for which the bell/notification has already fired
+# this attention episode - the atomic single-fire dedup across the per-window
+# sidebars (see notify_attention).
+NOTIFIED = os.path.join(STATE_DIR, "notified")
 SELECTION_FILE = os.path.join(STATE_DIR, "selection")
 WIDTH_FILE = os.path.join(STATE_DIR, "width")
 
@@ -158,6 +162,23 @@ def osc_progress_enabled():
     percentage. Default off (opt-in)."""
     value = tmux("show-option", "-gqv", "@wrangler-osc-progress").strip().lower()
     return value in ("on", "1", "yes", "true")
+
+
+def bell_enabled():
+    """Whether to ring the terminal bell when an agent needs attention. Default
+    off (opt-in)."""
+    value = tmux("show-option", "-gqv", "@wrangler-bell").strip().lower()
+    return value in ("on", "1", "yes", "true")
+
+
+def osc_notify_mode():
+    """The desktop-notification protocol for an agent needing attention:
+    '777' (also the meaning of on/1/yes/true), '9', or '' when disabled (the
+    default). See notify_attention."""
+    value = tmux("show-option", "-gqv", "@wrangler-osc-notify").strip().lower()
+    if value in ("777", "on", "1", "yes", "true"):
+        return "777"
+    return "9" if value == "9" else ""
 
 
 # team id -> (mtime, {pane_id: color}). A team's config is read only when we
@@ -328,7 +349,7 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles)
         work_marker = os.path.join(WORKING, name)
 
         def prune():
-            for stale in (path, attn_marker, work_marker):
+            for stale in (path, attn_marker, work_marker, os.path.join(NOTIFIED, name)):
                 try:
                     os.unlink(stale)
                 except OSError:
@@ -445,6 +466,98 @@ def write_selection(key):
             f.write("\t".join(key))
     except OSError:
         pass
+
+
+def _write_tty(path, data):
+    """Best-effort write of raw bytes to a tty (a pane tty for the bell, a client
+    tty for the notification). Never disturbs the draw loop."""
+    if not path:
+        return
+    try:
+        with open(path, "w") as f:
+            f.write(data)
+    except OSError:
+        pass
+
+
+def _client_ttys():
+    """The tty of every client attached to this sidebar's tmux session - the
+    terminals a desktop notification is written to."""
+    session = tmux("display-message", "-p", "-t", SIDEBAR_PANE, "#{session_name}").strip()
+    if not session:
+        return []
+    out = tmux("list-clients", "-t", session, "-F", "#{client_tty}")
+    return [t for t in out.split("\n") if t.strip()]
+
+
+def notify_attention(sessions, bell_on, osc_mode):
+    """Ring the bell / raise a desktop notification once per attention episode.
+
+    Reacts to the same attention state as the `●` row indicator: a session is
+    signalled while it holds an attention marker. fetch_agent_sessions has already
+    cleared that marker for a session whose pane is focused, so one you are
+    looking at never fires ("wanted you while you weren't looking"). Firing from
+    the poll loop means nothing signals while the sidebar is off.
+
+    Dedup: there is one sidebar per window, all polling, and a session can be
+    placed under several windows at once - so the fire is gated on an atomic
+    create of a per-session-id flag under NOTIFIED. Exactly one sidebar wins per
+    episode; the flag is pruned once the episode ends (its attention marker gone),
+    rearming the next one. The bell writes BEL to the session's pane tty (so tmux
+    applies its own monitor-bell); the notification writes the OSC escape to each
+    client tty. Both best-effort.
+    """
+    # One representative placement per session id, preferring the one under the
+    # active window (whose name titles the notification). Only sessions visible in
+    # a local window are signalled: a fully-detached session (shown nowhere) has
+    # no pane to bell and no window to name.
+    attention = {}
+    for s in sessions:
+        if s["status"] != "attention" or s["window"] is None:
+            continue
+        cur = attention.get(s["id"])
+        if cur is None or (s["window"]["active"] and not cur["window"]["active"]):
+            attention[s["id"]] = s
+
+    if bell_on or osc_mode:
+        try:
+            os.makedirs(NOTIFIED, exist_ok=True)
+        except OSError:
+            attention = {}  # can't dedup safely, so skip firing (still prune below)
+        for sid, s in attention.items():
+            try:
+                fd = os.open(os.path.join(NOTIFIED, sid),
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                continue  # another sidebar, or an earlier poll, already fired
+            except OSError:
+                continue
+            os.close(fd)
+            if osc_mode:
+                win = s["window"]["name"]
+                text = f"{win} · {s['label']}" if s["label"] else win
+                if osc_mode == "777":
+                    esc = f"\033]777;notify;{s['agent']};{text}\007"
+                else:
+                    esc = f"\033]9;{text}\007"
+                for tty in _client_ttys():
+                    _write_tty(tty, esc)
+            if bell_on and s["pane"]:
+                _write_tty(tmux("display-message", "-p", "-t", s["pane"], "#{pane_tty}").strip(), "\a")
+
+    # Prune flags whose episode has ended (no attention marker), rearming the next
+    # attention on that session. Runs even when disabled, so a disable/enable
+    # cycle starts clean. Sessions still in attention this poll keep their flag.
+    try:
+        flags = os.listdir(NOTIFIED)
+    except OSError:
+        flags = []
+    for name in flags:
+        if name not in attention and not os.path.exists(os.path.join(ATTENTION, name)):
+            try:
+                os.unlink(os.path.join(NOTIFIED, name))
+            except OSError:
+                pass
 
 
 # pane_pb_state values that mean "no progress to show": `hidden` (a pane that
@@ -821,6 +934,9 @@ def main(stdscr):
             # there has its attention dot cleared.
             focused_panes = {p["id"] for w in windows if w["active"] for p in w["panes"] if p["active"]}
             sessions = fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles)
+            # Ring the bell / raise the desktop notification for sessions newly
+            # needing attention (deduped across every window's sidebar).
+            notify_attention(sessions, bell_enabled(), osc_notify_mode())
             # Mirror each pane's agent turn-state into the window tree: attention
             # wins over working, matching fetch_agent_sessions' own precedence.
             pane_status = {}
