@@ -80,16 +80,25 @@ register_session() {
 # keep the stale path forever (turn events never re-register), and the sidebar
 # reads the title and /color from that transcript, so both would go missing.
 refresh_record() {
-  local cwd transcript old_pane old_agent old_pid old_cwd old_transcript
+  local cwd transcript rec line old_pane old_agent old_pid old_cwd old_transcript
   transcript="$(printf '%s' "$parsed" | sed -n 3p)"
   [ -n "$transcript" ] || return 0  # no transcript in payload: nothing to refresh
-  IFS=$'\t' read -r old_pane old_agent old_pid old_cwd old_transcript \
-    < "$REGISTRY/$agent-$session_id" || return 0
+  rec="$REGISTRY/$agent-$session_id"
+  # Split the record with cut, not `IFS=$'\t' read`: tab is IFS whitespace, so
+  # read trims the empty leading pane field of a daemon (pane-less) record and
+  # shifts every field left (pane<-agent, ...), corrupting the record - the
+  # sidebar then prunes it as a bogus non-local pane. cut preserves empties.
+  IFS= read -r line < "$rec" || return 0
+  old_pane="$(printf '%s' "$line" | cut -f1)"
+  old_agent="$(printf '%s' "$line" | cut -f2)"
+  old_pid="$(printf '%s' "$line" | cut -f3)"
+  old_cwd="$(printf '%s' "$line" | cut -f4)"
+  old_transcript="$(printf '%s' "$line" | cut -f5)"
   [ "$transcript" = "$old_transcript" ] && return 0  # unchanged: leave it be
   cwd="$(printf '%s' "$parsed" | sed -n 2p)"
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "$old_pane" "$old_agent" "$old_pid" "${cwd:-$old_cwd}" "$transcript" \
-    > "$REGISTRY/$agent-$session_id"
+    > "$rec"
 }
 
 # Register when the record is missing, else refresh a relocated transcript. The
