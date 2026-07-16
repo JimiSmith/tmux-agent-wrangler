@@ -24,12 +24,12 @@ sidebar that follows you.
 * 1: vim
    └─ api-service ●
   3: agents
-   └─ frontend ◐
+   └─ frontend ⠹
 
  COPILOT
 
   3: agents
-   └─ docs ◐
+   └─ docs ⠹
 ```
 
 ## Requirements
@@ -69,15 +69,16 @@ focuses its window and pane.
 Each session is annotated with its turn state, so you can see at a glance what
 your agents are doing:
 
-- `◐` — working: a turn is in progress. Shown from turn start until it ends,
-  whether or not you are looking at the pane.
+- a spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, animated) — working: a turn is in progress. Shown from
+  turn start until it ends, whether or not you are looking at the pane.
 - `●` — attention: the agent finished a turn or raised a notification (e.g. a
   permission prompt) and is waiting on you. The dot clears as soon as you focus
   that session's pane, so it means "wanted your attention while you were not
   looking at it".
 
-The two are mutually exclusive: starting a turn replaces the dot with `◐`,
-finishing one replaces `◐` with the dot. The annotations are optional; they
+The two are mutually exclusive: starting a turn replaces the dot with the
+spinner, finishing one replaces the spinner with the dot. The annotations are
+optional; they
 come from two families of hooks wired below — `working` on every event that
 begins a turn, and `needsAttention` on every event that ends one or hands
 control back to you (a stop, an error, a notification, or a permission
@@ -228,7 +229,7 @@ set -g @wrangler-sync-width on # resizing one sidebar resizes them all ('off' to
 set -g @wrangler-auto-install-hooks off # install agent hooks on plugin load ('on' to enable)
 set -g @wrangler-bell off      # ring the terminal bell when an agent needs attention ('on' to enable)
 set -g @wrangler-label name    # agent row label: 'name' (session title, default) | 'dir' (working-dir basename)
-set -g @wrangler-hook-progress on  # ◐/● working/attention indicators from agent hooks ('off' to disable)
+set -g @wrangler-hook-progress on  # spinner/● working/attention indicators from agent hooks ('off' to disable)
 set -g @wrangler-osc-progress off  # OSC 9;4 progress % reported by panes ('on' to enable)
 set -g @wrangler-osc-notify off    # desktop notification when an agent needs attention: 'off' | '777' (or 'on') | '9'
 ```
@@ -250,23 +251,23 @@ your Claude theme (read from `~/.claude/settings.json`) and mapped to the same
 xterm-256 index Claude itself emits (Claude renders these colors as 256-color
 indices, so the row matches exactly rather than approximately); the ANSI themes
 and non-256-color terminals fall back to the base terminal colors. Turn state
-stays legible through the `◐`/`●` glyph.
+stays legible through the spinner/`●` glyph.
 
 The sidebar pins a progress indicator to the right edge of each row, from two
 independent sources you can toggle separately:
 
 - `@wrangler-hook-progress` (default on) draws the hook-driven turn state:
-  `◐` while an agent is working, `●` once it wants attention. These come from
-  the agent hooks (see [Agent sessions](#agent-sessions)).
+  an animated spinner while an agent is working, `●` once it wants attention.
+  These come from the agent hooks (see [Agent sessions](#agent-sessions)).
 - `@wrangler-osc-progress` (default off) draws an app's OSC 9;4 progress report
   as a percentage colored by state (`normal` green, `paused` yellow, `error`
-  red, `indeterminate` `◐`; `hidden` shows nothing). It reads tmux's
+  red, `indeterminate` the spinner; `hidden` shows nothing). It reads tmux's
   `#{pane_pb_progress}` / `#{pane_pb_state}`, so it needs a tmux new enough to
   expose them; on an older tmux enabling it is a harmless no-op.
 
 Both indicators appear in the window tree (per pane) and the agents section.
 When both are enabled, OSC wins for any pane actively reporting progress; a pane
-with no OSC progress falls back to its `◐`/`●` hook glyph.
+with no OSC progress falls back to its spinner/`●` hook glyph.
 
 `@wrangler-osc-notify` (default off) raises a desktop notification the moment an
 agent needs attention — the same instant `@wrangler-bell` rings, and gated

@@ -89,16 +89,21 @@ independent instances behaving as one.
     row and Enter/click on any of them focuses the same target.
   - **Progress indicators** (`progress_indicator`): a single glyph/percentage
     pinned to each row's right edge, from two independently-toggled sources.
-    `@wrangler-hook-progress` (default on) draws the hook turn state (`◐`
-    working / `●` attention). `@wrangler-osc-progress` (default off) draws an
-    app's OSC 9;4 report as a state-colored percentage, read from the
-    `#{pane_pb_state}` / `#{pane_pb_progress}` pane vars in `fetch_windows`
+    `@wrangler-hook-progress` (default on) draws the hook turn state (an animated
+    spinner while working / `●` attention). `@wrangler-osc-progress` (default
+    off) draws an app's OSC 9;4 report as a state-colored percentage, read from
+    the `#{pane_pb_state}` / `#{pane_pb_progress}` pane vars in `fetch_windows`
     (empty on a tmux too old to know them, so it degrades to a no-op). OSC wins
     when a pane reports an active state (tmux 3.7 uses `hidden` for none, and
     names OSC state 4 `paused`), else the hook glyph. Both render in
     the window tree (per pane, keyed off `pane_progress` / `pane_status`) and
     the agents section. `draw()` gives the indicator its own color pair (green/
-    yellow/red per state) so it stands out from the row's own color.
+    yellow/red per state) so it stands out from the row's own color. The busy
+    glyph (hook `working`, OSC `indeterminate`) is a spinner (`spinner_frame`):
+    `main` advances a `frame` counter on a sub-second timer independent of the
+    1s data poll — between polls it only re-runs `build_rows` on the cached poll
+    data and repaints, and the fast timer engages only while a spinner is on
+    screen, so an idle sidebar still just blocks for the poll interval.
   - **Width sync** (`@wrangler-sync-width`, `@wrangler-min-width`): the
     trickiest code. It distinguishes a *user* resize (clamp to the floor,
     publish to the `width` file for other sidebars to adopt) from tmux
@@ -132,7 +137,7 @@ independent instances behaving as one.
   a no-op outside tmux (no `TMUX_PANE`), and the marker branches re-check the
   record exists after ensuring registration, so an agent running outside a tmux
   pane still leaves no orphan. The
-  sidebar renders `◐` for working and `●` for attention, and deletes the
+  sidebar renders an animated spinner for working and `●` for attention, and deletes the
   attention marker once its pane is focused (the working marker persists until
   the turn ends). `sidebar.py` prunes any registry entry (and both markers)
   whose pane is gone or whose PID is dead. On the transition *into* attention

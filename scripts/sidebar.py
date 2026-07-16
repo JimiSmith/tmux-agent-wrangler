@@ -18,6 +18,7 @@ import locale
 import os
 import subprocess
 import sys
+import time
 
 # The agent-row label logic is shared with agent-hook.sh (which imports the same
 # module to build the OSC 9 notification body), so the notification text matches
@@ -383,29 +384,44 @@ def write_selection(key):
 _INACTIVE_STATES = ("", "hidden")
 
 # OSC 9;4 state -> the color key used for its percentage. 'indeterminate' has no
-# meaningful number so it renders as a busy ◐ in the row's own color instead.
+# meaningful number so it renders as a busy spinner in the row's own color
+# instead.
 _STATE_COLOR = {"normal": "green", "paused": "yellow", "error": "red"}
 
+# Frames of the "busy" spinner cycled through for the working / indeterminate
+# indicator. The main loop advances the frame index on a sub-second timer
+# (independent of the 1s data poll), so a caller passes the current index and
+# `spinner_frame` wraps it. Single-width braille glyphs keep the pinned
+# indicator one column wide across every frame.
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_SPINNER_FRAMES = frozenset(_SPINNER)
 
-def progress_indicator(hook_status, pb_state, pb_progress, hook_on, osc_on):
+
+def spinner_frame(frame):
+    """The busy-spinner glyph for animation frame `frame` (any int; wraps)."""
+    return _SPINNER[frame % len(_SPINNER)]
+
+
+def progress_indicator(hook_status, pb_state, pb_progress, hook_on, osc_on, frame):
     """(text, color) for the right-pinned indicator, or ("", None).
 
     OSC wins when the pane reports an active state (see _INACTIVE_STATES);
-    otherwise the hook ◐/● glyph. `color` is a state-color key for OSC
-    percentages, or None to inherit the row's own attribute (the hook glyph and
-    OSC 'indeterminate').
+    otherwise the hook glyph. A busy state (hook `working`, OSC `indeterminate`)
+    draws the animated spinner for `frame`; `attention` stays the static ●.
+    `color` is a state-color key for OSC percentages, or None to inherit the
+    row's own attribute (the hook glyph and OSC 'indeterminate').
     """
     if osc_on and pb_state not in _INACTIVE_STATES:
         if pb_state == "indeterminate":
-            return "◐", None
-        text = f"{pb_progress}%" if pb_progress is not None else "◐"
+            return spinner_frame(frame), None
+        text = f"{pb_progress}%" if pb_progress is not None else spinner_frame(frame)
         return text, _STATE_COLOR.get(pb_state)
     if hook_on and hook_status in ("working", "attention"):
-        return {"attention": "●", "working": "◐"}[hook_status], None
+        return {"attention": "●", "working": spinner_frame(frame)}[hook_status], None
     return "", None
 
 
-def _append_agent_rows(rows, group, win, pane_progress, hook_on, osc_on):
+def _append_agent_rows(rows, group, win, pane_progress, hook_on, osc_on, frame):
     """Append the tree rows for one group of agent sessions under a heading.
 
     `win` is the window the group is filed under, or None for the pane-less
@@ -417,7 +433,7 @@ def _append_agent_rows(rows, group, win, pane_progress, hook_on, osc_on):
         branch = "└─" if i == last else "├─"
         pb_state, pb_progress = pane_progress.get(s["pane"], ("", None))
         indicator, indicator_color = progress_indicator(
-            s["status"], pb_state, pb_progress, hook_on, osc_on
+            s["status"], pb_state, pb_progress, hook_on, osc_on, frame
         )
         # The indicator rides on the item, not the text: draw() pins it to the
         # right edge so it survives a long title being truncated.
@@ -429,13 +445,14 @@ def _append_agent_rows(rows, group, win, pane_progress, hook_on, osc_on):
         )
 
 
-def build_rows(windows, sessions, pane_progress, pane_status, hook_on, osc_on):
+def build_rows(windows, sessions, pane_progress, pane_status, hook_on, osc_on, frame):
     """Flat list of (text, item) rows; item is a selectable dict, "header", or None.
 
     `pane_progress` maps pane id -> (pb_state, pb_progress) for OSC 9;4;
     `pane_status` maps pane id -> hook turn status ("attention"/"working") so a
-    window-tree pane running an agent mirrors that agent's ◐/● glyph. hook_on /
-    osc_on gate the two indicator sources (see progress_indicator).
+    window-tree pane running an agent mirrors that agent's glyph. `frame` is the
+    current spinner animation index (see progress_indicator). hook_on / osc_on
+    gate the two indicator sources.
     """
     rows = [(" WINDOWS", "header"), ("", None)]
     for w in windows:
@@ -446,7 +463,7 @@ def build_rows(windows, sessions, pane_progress, pane_status, hook_on, osc_on):
             branch = "└─" if i == last else "├─"
             active = "*" if p["active"] else " "
             indicator, indicator_color = progress_indicator(
-                pane_status.get(p["id"], ""), p["pb_state"], p["pb_progress"], hook_on, osc_on
+                pane_status.get(p["id"], ""), p["pb_state"], p["pb_progress"], hook_on, osc_on, frame
             )
             rows.append(
                 (f"   {branch}{active}{p['index']}: {p['title']}",
@@ -468,12 +485,12 @@ def build_rows(windows, sessions, pane_progress, pane_status, hook_on, osc_on):
                 (f"{marker} {w['index']}: {w['name']}",
                  {"kind": "window", "key": ("w", agent, w["id"]), "win": w})
             )
-            _append_agent_rows(rows, group, w, pane_progress, hook_on, osc_on)
+            _append_agent_rows(rows, group, w, pane_progress, hook_on, osc_on, frame)
         # Pane-less sessions collect under a non-selectable "Agents" heading.
         detached = [s for s in agent_sessions if s["window"] is None]
         if detached:
             rows.append(("  Agents", None))
-            _append_agent_rows(rows, detached, None, pane_progress, hook_on, osc_on)
+            _append_agent_rows(rows, detached, None, pane_progress, hook_on, osc_on, frame)
     return rows
 
 
@@ -635,11 +652,20 @@ def main(stdscr):
     init_agent_colors()
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
     curses.mouseinterval(0)
-    stdscr.timeout(1000)
 
     # Report focus changes while running and stop on exit.
     set_focus_reporting(True)
     atexit.register(set_focus_reporting, False)
+
+    # The data poll (tmux queries, width sync, shared selection) runs at
+    # POLL_INTERVAL; the spinner animates faster, so between polls we only
+    # advance the frame and repaint the rows rebuilt from the cached poll data.
+    # Any real input - a key, a focus report, a resize - forces a fresh poll, so
+    # focus/selection stay as responsive as the old per-tick fetch. The fast
+    # timer is used only while a spinner is on screen; an idle sidebar keeps
+    # blocking for POLL_INTERVAL as before.
+    POLL_INTERVAL = 1.0
+    ANIM_INTERVAL_MS = 125
 
     selected_key = None
     offset = 0
@@ -649,84 +675,95 @@ def main(stdscr):
     pending_width = None
     last_pane_set = None
     relayout_grace = 0
+    frame = 0
+    last_poll = 0.0
+    force_poll = True
+    cached = None
 
     while True:
-        windows, pane_to_window, sidebars, pane_paths, pane_progress, sidebar_active = fetch_windows()
-        if not windows:
-            return
-        me = pane_to_window.get(SIDEBAR_PANE)
-        if me is None:
-            return
-        # Only the focused sidebar (active pane of the active window) shows the
-        # keyboard-selection bar; the shared selection is otherwise painted on
-        # every window's sidebar at once, which misreads as a live cursor.
-        has_focus = me["active"] and sidebar_active
-        # Exit if a lower-numbered sidebar occupies this window (spawn race),
-        # or if no real panes remain here (tmux then closes the window).
-        for p in sidebars:
-            if p != SIDEBAR_PANE and pane_to_window.get(p) is me and int(p[1:]) < int(SIDEBAR_PANE[1:]):
+        now = time.monotonic()
+        if force_poll or cached is None or now - last_poll >= POLL_INTERVAL - 0.1:
+            force_poll = False
+            last_poll = now
+            windows, pane_to_window, sidebars, pane_paths, pane_progress, sidebar_active = fetch_windows()
+            if not windows:
                 return
-        if not me["panes"]:
-            return
+            me = pane_to_window.get(SIDEBAR_PANE)
+            if me is None:
+                return
+            # Only the focused sidebar (active pane of the active window) shows the
+            # keyboard-selection bar; the shared selection is otherwise painted on
+            # every window's sidebar at once, which misreads as a live cursor.
+            has_focus = me["active"] and sidebar_active
+            # Exit if a lower-numbered sidebar occupies this window (spawn race),
+            # or if no real panes remain here (tmux then closes the window).
+            for p in sidebars:
+                if p != SIDEBAR_PANE and pane_to_window.get(p) is me and int(p[1:]) < int(SIDEBAR_PANE[1:]):
+                    return
+            if not me["panes"]:
+                return
 
-        # A change in this window's pane set means an imminent width change
-        # is tmux redistributing space, not a user resize. The grace covers
-        # the following tick too, since the resize event and the pane-list
-        # fetch are not ordered.
-        my_panes = {p["id"] for p in me["panes"]}
-        if last_pane_set is not None and my_panes != last_pane_set:
-            relayout_grace = 2
-        last_pane_set = my_panes
+            # A change in this window's pane set means an imminent width change
+            # is tmux redistributing space, not a user resize. The grace covers
+            # the following tick too, since the resize event and the pane-list
+            # fetch are not ordered.
+            my_panes = {p["id"] for p in me["panes"]}
+            if last_pane_set is not None and my_panes != last_pane_set:
+                relayout_grace = 2
+            last_pane_set = my_panes
 
-        # Enforce the minimum width and keep widths in sync. A width change
-        # we did not request ourselves (i.e. a user resize) is clamped to
-        # the floor and published; a relayout-caused one is snapped back; an
-        # unchanged width adopts a differing published one. pending_width
-        # marks our own resize-pane requests so their landing is not
-        # mistaken for a user resize and republished.
-        width_now = stdscr.getmaxyx()[1]
-        if width_now != last_width:
-            requested = pending_width
-            pending_width = None
-            if width_now != requested:
-                if relayout_grace:
-                    restore = read_width() if sync else None
-                    if not restore or restore < floor:
-                        restore = max(last_width, floor)
-                    if restore != width_now:
-                        tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(restore))
-                        pending_width = restore
-                else:
-                    target = max(width_now, floor)
-                    if target != width_now:
-                        tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(target))
-                        pending_width = target
-                    if sync and read_width() != target:
-                        write_width(target)
-        elif sync and pending_width is None:
-            shared_width = read_width()
-            if shared_width and shared_width >= floor and shared_width != width_now:
-                tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(shared_width))
-                pending_width = shared_width
-        last_width = width_now
-        relayout_grace = max(0, relayout_grace - 1)
+            # Enforce the minimum width and keep widths in sync. A width change
+            # we did not request ourselves (i.e. a user resize) is clamped to
+            # the floor and published; a relayout-caused one is snapped back; an
+            # unchanged width adopts a differing published one. pending_width
+            # marks our own resize-pane requests so their landing is not
+            # mistaken for a user resize and republished.
+            width_now = stdscr.getmaxyx()[1]
+            if width_now != last_width:
+                requested = pending_width
+                pending_width = None
+                if width_now != requested:
+                    if relayout_grace:
+                        restore = read_width() if sync else None
+                        if not restore or restore < floor:
+                            restore = max(last_width, floor)
+                        if restore != width_now:
+                            tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(restore))
+                            pending_width = restore
+                    else:
+                        target = max(width_now, floor)
+                        if target != width_now:
+                            tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(target))
+                            pending_width = target
+                        if sync and read_width() != target:
+                            write_width(target)
+            elif sync and pending_width is None:
+                shared_width = read_width()
+                if shared_width and shared_width >= floor and shared_width != width_now:
+                    tmux("resize-pane", "-t", SIDEBAR_PANE, "-x", str(shared_width))
+                    pending_width = shared_width
+            last_width = width_now
+            relayout_grace = max(0, relayout_grace - 1)
 
-        shared = read_selection()
-        if shared:
-            selected_key = shared
-        # The focused pane is the active pane of the active window; a session
-        # there has its attention dot cleared.
-        focused_panes = {p["id"] for w in windows if w["active"] for p in w["panes"] if p["active"]}
-        sessions = fetch_agent_sessions(pane_to_window, focused_panes, pane_paths)
-        # Mirror each pane's agent turn-state into the window tree: attention
-        # wins over working, matching fetch_agent_sessions' own precedence.
-        pane_status = {}
-        for s in sessions:
-            if s["pane"] and (s["status"] == "attention" or (s["status"] == "working" and pane_status.get(s["pane"]) != "attention")):
-                pane_status[s["pane"]] = s["status"]
-        hook_on = hook_progress_enabled()
-        osc_on = osc_progress_enabled()
-        rows = build_rows(windows, sessions, pane_progress, pane_status, hook_on, osc_on)
+            shared = read_selection()
+            if shared:
+                selected_key = shared
+            # The focused pane is the active pane of the active window; a session
+            # there has its attention dot cleared.
+            focused_panes = {p["id"] for w in windows if w["active"] for p in w["panes"] if p["active"]}
+            sessions = fetch_agent_sessions(pane_to_window, focused_panes, pane_paths)
+            # Mirror each pane's agent turn-state into the window tree: attention
+            # wins over working, matching fetch_agent_sessions' own precedence.
+            pane_status = {}
+            for s in sessions:
+                if s["pane"] and (s["status"] == "attention" or (s["status"] == "working" and pane_status.get(s["pane"]) != "attention")):
+                    pane_status[s["pane"]] = s["status"]
+            hook_on = hook_progress_enabled()
+            osc_on = osc_progress_enabled()
+            cached = (windows, sessions, pane_progress, pane_status, hook_on, osc_on, has_focus)
+
+        windows, sessions, pane_progress, pane_status, hook_on, osc_on, has_focus = cached
+        rows = build_rows(windows, sessions, pane_progress, pane_status, hook_on, osc_on, frame)
         items = [item for _, item in rows if isinstance(item, dict)]
         keys = [item["key"] for item in items]
         if selected_key not in keys:
@@ -735,7 +772,15 @@ def main(stdscr):
             )
         offset = draw(stdscr, rows, selected_key, offset, has_focus)
 
+        # Tick fast only while a spinner glyph is on screen, so an idle sidebar
+        # still just blocks for the poll interval.
+        animating = any(isinstance(it, dict) and it.get("indicator") in _SPINNER_FRAMES for _, it in rows)
+        stdscr.timeout(ANIM_INTERVAL_MS if animating else int(POLL_INTERVAL * 1000))
+
         ch = stdscr.getch()
+        frame += 1
+        if ch != -1:
+            force_poll = True
         if ch == curses.KEY_RESIZE:
             continue
         if ch in (ord("q"), ord("Q")):
