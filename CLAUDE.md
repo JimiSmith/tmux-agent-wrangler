@@ -153,7 +153,9 @@ independent instances behaving as one.
   entry when the process dies, as a backstop for crashes that skip an end hook.
   `working` (Claude Code's
   `UserPromptSubmit` plus the resume signals `PostToolUse` / `PostToolUseFailure`
-  / `PostToolBatch` / `SubagentStart`; Copilot's `userPromptSubmitted`) and
+  / `PostToolBatch` / `SubagentStart`; Copilot's `userPromptSubmitted`,
+  `postToolUse`, `postToolUseFailure`, `subagentStart`, `subagentStop`, and the
+  background-completion/idle `notification` types) and
   `needsAttention` (Claude Code's `Stop` / `StopFailure` / `PermissionRequest`,
   the `idle_prompt` and `elicitation_dialog` `Notification` types, and a
   `PreToolUse` matcher for the `AskUserQuestion` / `ExitPlanMode` interactive
@@ -179,10 +181,12 @@ independent instances behaving as one.
 
 - **`scripts/session_labels.py`** — `sidebar.py`'s agent-row label logic, kept in
   its own module so the transcript-scanning stays isolated and testable. Holds
-  `session_meta` (reads the session title / teammate `@name` / `/color` from the
-  transcript tail), `agent_label` (composes the row text from mode/title/agent/dir),
-  and `label_mode_from` (the `@wrangler-label` `dir`-else-`name` rule). Stdlib-only
-  (json/os), no curses, no `TMUX_PANE`.
+  `session_meta` (reads Claude's session title / teammate `@name` / `/color`
+  from the transcript tail, or Copilot's live `name` / `summary` from
+  `~/.copilot/session-state/<id>/workspace.yaml`), `agent_label` (composes the
+  row text from mode/title/agent/dir), and `label_mode_from` (the
+  `@wrangler-label` `dir`-else-`name` rule). Stdlib-only (json/os), no curses,
+  no `TMUX_PANE`.
 
 - **`scripts/install-hooks.py`** — installs (or `--uninstall`s) the
   `agent-hook.sh` invocations into each agent's config so users need not hand-edit

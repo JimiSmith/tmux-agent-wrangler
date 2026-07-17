@@ -43,9 +43,9 @@ session_id="${session_id//\//_}"
 register_session() {
   local cwd transcript agent_pid pid cmdline
   cwd="$(printf '%s' "$parsed" | sed -n 2p)"
-  # Path to the agent's transcript (Claude Code only; empty otherwise). The
-  # sidebar reads the session's human-readable title from it live, so we record
-  # it once at registration rather than re-reading on every turn event.
+  # Path to the agent's transcript when the event provides one (Claude
+  # lifecycle events and Copilot agentStop). Claude titles are read from it;
+  # Copilot titles come from workspace.yaml.
   transcript="$(printf '%s' "$parsed" | sed -n 3p)"
 
   # Find the agent process among our ancestors so the sidebar can prune the

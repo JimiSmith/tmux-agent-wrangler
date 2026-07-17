@@ -381,7 +381,9 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles)
         if pane and pane not in pane_to_window and pane not in all_panes and not pid.isdigit():
             prune()
             continue
-        title, agent_name, team, color = session_meta(transcript)
+        prefix = agent + "-"
+        session_id = name[len(prefix):] if name.startswith(prefix) else name
+        title, agent_name, team, color = session_meta(transcript, agent, session_id)
         candidates.append(
             {"id": name, "agent": agent, "recorded_pane": pane, "cwd": cwd,
              "title": title, "agent_name": agent_name, "team": team, "color": color,

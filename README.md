@@ -81,14 +81,18 @@ spinner, finishing one replaces the spinner with the dot. The annotations are
 optional; they
 come from two families of hooks wired below — `working` on every event that
 begins a turn, and `needsAttention` on every event that ends one or hands
-control back to you (a stop, an error, a notification, or a permission
-prompt). Wire as many of each family as your agent fires; more coverage just
-means the state flips sooner.
+control back to you (a stop, an error, an attention-worthy notification, or a
+permission prompt). Wire as many of each family as your agent fires; more
+coverage just means the state flips sooner.
 
 Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
 `~/.local/state/...`) via `scripts/agent-hook.sh <agent> <start|end|working|needsAttention>`.
 The start hook records the pane, cwd, and the agent's PID; the sidebar prunes
 an entry when its pane disappears or its process exits.
+
+Session names update live. Claude titles come from its transcript; Copilot
+titles come from `~/.copilot/session-state/<session-id>/workspace.yaml`
+(`name`, falling back to `summary`), including changes made with `/rename`.
 
 ### Automatic install
 
@@ -184,6 +188,18 @@ Create `~/.copilot/hooks/wrangler.json`:
     "userPromptSubmitted": [
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
     ],
+    "postToolUse": [
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+    ],
+    "postToolUseFailure": [
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+    ],
+    "subagentStart": [
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+    ],
+    "subagentStop": [
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+    ],
     "agentStop": [
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
     ],
@@ -191,6 +207,11 @@ Create `~/.copilot/hooks/wrangler.json`:
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
     ],
     "notification": [
+      {
+        "type": "command",
+        "matcher": "shell_completed|shell_detached_completed|agent_completed|agent_idle",
+        "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working"
+      },
       {
         "type": "command",
         "matcher": "permission_prompt|elicitation_dialog",
@@ -207,14 +228,20 @@ Create `~/.copilot/hooks/wrangler.json`:
 Copilot CLI fires `sessionStart` once when a new or resumed session begins and
 `sessionEnd` once when it terminates. They register and unregister the sidebar
 row respectively; PID pruning remains a backstop for crashes that skip the end
-hook. `userPromptSubmitted` marks the turn working, while `agentStop` and
-`errorOccurred` mark it as needing attention.
+hook. `userPromptSubmitted`, tool results, and subagent lifecycle events mark
+the turn working, so the spinner recovers whenever Copilot continues after an
+intermediate interaction. Background shell and agent completion notifications
+also mark working because Copilot immediately resumes the main agent to process
+them. `agentStop` and `errorOccurred` mark the session as needing attention.
 
 `permissionRequest` is deliberately not an attention signal: it runs before
 Copilot's permission rules for every applicable tool call, including calls that
 are allowed without prompting the user. The matched `notification` hook instead
-reacts only when Copilot actually displays a permission prompt or elicitation
-dialog.
+marks only actual permission prompts and elicitation dialogs as attention;
+background completion and idle notifications are continuation signals instead.
+The status hook deliberately does not use `preToolUse`: Copilot treats failures
+from command hooks on that event as a denial, so sidebar telemetry must not sit
+on the tool-execution critical path.
 
 ## Options
 
