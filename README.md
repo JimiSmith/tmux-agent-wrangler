@@ -86,7 +86,7 @@ permission prompt). Wire as many of each family as your agent fires; more
 coverage just means the state flips sooner.
 
 Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
-`~/.local/state/...`) via `scripts/agent-hook.sh <agent> <start|end|working|needsAttention>`.
+`~/.local/state/...`) via `scripts/agent-hook.sh`.
 The start hook records the pane, cwd, and the agent's PID; the sidebar prunes
 an entry when its pane disappears or its process exits.
 
@@ -204,7 +204,7 @@ Create `~/.copilot/hooks/wrangler.json`:
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
     ],
     "errorOccurred": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot error" }
     ],
     "notification": [
       {
@@ -228,11 +228,13 @@ Create `~/.copilot/hooks/wrangler.json`:
 Copilot CLI fires `sessionStart` once when a new or resumed session begins and
 `sessionEnd` once when it terminates. They register and unregister the sidebar
 row respectively; PID pruning remains a backstop for crashes that skip the end
-hook. `userPromptSubmitted`, tool results, and subagent lifecycle events mark
-the turn working, so the spinner recovers whenever Copilot continues after an
-intermediate interaction. Background shell and agent completion notifications
-also mark working because Copilot immediately resumes the main agent to process
-them. `agentStop` and `errorOccurred` mark the session as needing attention.
+hook. `userPromptSubmitted`, tool results, and subagent lifecycle events keep
+the parent turn working. Copilot subagents are not separate interactive
+sessions, so they do not get their own sidebar rows. Background shell and agent
+completion notifications also mark working because Copilot immediately resumes
+the main agent to process them. `agentStop` and non-recoverable
+`errorOccurred` events mark the session as needing attention; recoverable
+errors keep it working while Copilot continues.
 
 `permissionRequest` is deliberately not an attention signal: it runs before
 Copilot's permission rules for every applicable tool call, including calls that

@@ -4,7 +4,7 @@
 # can annotate it: `working` while a turn is in progress, `needsAttention` once
 # it finishes a turn or raises a notification. The two states are mutually
 # exclusive; each clears the other.
-# Usage: agent-hook.sh <agent> <start|end|working|needsAttention>
+# Usage: agent-hook.sh <agent> <start|end|working|needsAttention|error>
 # Reads the hook JSON payload on stdin (Claude Code snake_case or Copilot CLI
 # camelCase). Exits silently outside tmux.
 set -euo pipefail
@@ -21,14 +21,26 @@ input="$(cat || true)"
 parsed="$(printf '%s' "$input" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-print(d.get("session_id") or d.get("sessionId") or "")
+transcript = d.get("transcript_path") or d.get("transcriptPath") or ""
+session_id = d.get("session_id") or d.get("sessionId") or ""
+print(session_id)
 print(d.get("cwd", ""))
-print(d.get("transcript_path") or d.get("transcriptPath") or "")
+print(transcript)
+recoverable = d.get("recoverable")
+print("true" if recoverable is True else "false" if recoverable is False else "")
 ' 2>/dev/null || true)"
 
 session_id="$(printf '%s' "$parsed" | sed -n 1p)"
 session_id="${session_id//\//_}"
 [ -z "$session_id" ] && exit 0
+recoverable="$(printf '%s' "$parsed" | sed -n 4p)"
+if [ "$event" = "error" ]; then
+  if [ "$agent" = "copilot" ] && [ "$recoverable" = "true" ]; then
+    event="working"
+  else
+    event="needsAttention"
+  fi
+fi
 
 # The bell and the OSC desktop notification are raised by the sidebar from its
 # poll loop (it reacts to the attention marker written below, and knows the

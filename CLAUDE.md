@@ -146,7 +146,7 @@ independent instances behaving as one.
 - **`scripts/agent-hook.sh`** — registers/unregisters an agent session in
   `sessions/` and flags its turn state in `working/` and `attention/`. Called
   from the agent's own lifecycle hooks as
-  `agent-hook.sh <agent> <start|end|working|needsAttention>` with the hook JSON
+  `agent-hook.sh <agent> <start|end|working|needsAttention|error>` with the hook JSON
   on stdin (parses both Claude Code snake_case and Copilot CLI camelCase). The
   registry record is `pane<TAB>agent<TAB>pid<TAB>cwd<TAB>transcript`; it walks
   the process ancestry to find the agent's PID so the sidebar can prune the
@@ -154,13 +154,14 @@ independent instances behaving as one.
   `working` (Claude Code's
   `UserPromptSubmit` plus the resume signals `PostToolUse` / `PostToolUseFailure`
   / `PostToolBatch` / `SubagentStart`; Copilot's `userPromptSubmitted`,
-  `postToolUse`, `postToolUseFailure`, `subagentStart`, `subagentStop`, and the
+  `postToolUse`, `postToolUseFailure`, subagent lifecycle actions, and the
   background-completion/idle `notification` types) and
   `needsAttention` (Claude Code's `Stop` / `StopFailure` / `PermissionRequest`,
   the `idle_prompt` and `elicitation_dialog` `Notification` types, and a
   `PreToolUse` matcher for the `AskUserQuestion` / `ExitPlanMode` interactive
-  tools; Copilot's `agentStop`, `errorOccurred`, and matched `permission_prompt`
-  / `elicitation_dialog` notifications) each write their marker and delete the
+  tools; Copilot's `agentStop`, non-recoverable `errorOccurred`, and matched
+  `permission_prompt` / `elicitation_dialog` notifications) each write their
+  marker and delete the
   other's, so the two are mutually exclusive. Copilot's `sessionStart` registers
   the session and `sessionEnd` unregisters it. Every event (`start`, `working`,
   `needsAttention`) self-registers the session first via `register_session` if
@@ -172,7 +173,10 @@ independent instances behaving as one.
   pane still leaves no orphan. The
   sidebar renders an animated spinner for working and `●` for attention, and deletes the
   attention marker once its pane is focused (the working marker persists until
-  the turn ends). `sidebar.py` prunes any registry entry (and both markers)
+  the turn ends). Recoverable Copilot errors remain working. Copilot subagents
+  are not separately interactive sessions, so their lifecycle events only keep
+  the parent working and never create their own sidebar rows. `sidebar.py`
+  prunes any registry entry (and both markers)
   whose pane is gone or whose PID is dead. The hook does *not* fire the bell or
   the desktop notification: it only writes the attention marker. The sidebar
   reacts to that marker (see `notify_attention` in the `sidebar.py` bullet),

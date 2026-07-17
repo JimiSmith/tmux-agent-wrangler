@@ -31,7 +31,7 @@
       "subagentStart": ["working"],
       "subagentStop": ["working"],
       "agentStop": ["needsAttention"],
-      "errorOccurred": ["needsAttention"],
+      "errorOccurred": ["error"],
       "notification": [
         { "matcher": "shell_completed|shell_detached_completed|agent_completed|agent_idle", "actions": ["working"] },
         { "matcher": "permission_prompt|elicitation_dialog", "actions": ["needsAttention"] }
