@@ -13,6 +13,7 @@ exits, letting tmux close the window.
 """
 import atexit
 import curses
+import fcntl
 import json
 import locale
 import os
@@ -33,9 +34,9 @@ STATE_DIR = os.path.join(
 REGISTRY = os.path.join(STATE_DIR, "sessions")
 ATTENTION = os.path.join(STATE_DIR, "attention")
 WORKING = os.path.join(STATE_DIR, "working")
-# One flag file per session id for which the bell/notification has already fired
-# this attention episode - the atomic single-fire dedup across the per-window
-# sidebars (see notify_attention).
+# One flag file per session id containing the latest attention-event token whose
+# bell/notification has fired. File locking provides single-fire dedup across
+# the per-window sidebars (see notify_attention).
 NOTIFIED = os.path.join(STATE_DIR, "notified")
 SELECTION_FILE = os.path.join(STATE_DIR, "selection")
 WIDTH_FILE = os.path.join(STATE_DIR, "width")
@@ -308,16 +309,28 @@ def pid_alive(pid):
     return True
 
 
-def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles):
+def _attention_token(path):
+    """Return an attention marker's event token, including legacy empty markers."""
+    try:
+        with open(path) as f:
+            token = f.read().strip()
+        if token.isdigit():
+            return int(token)
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def fetch_agent_sessions(pane_to_window, pane_paths, pane_titles):
     """Read the hook registry; prune dead entries and file each session under
     the window(s) of the pane(s) currently displaying it.
 
     A session carries a turn status set by agent-hook.sh: "working" while a
     turn is in progress, "attention" once it finishes a turn or notifies. The
-    attention marker (and so the dot) clears once any pane showing the session
-    is the focused pane, meaning "wanted attention while you were not looking at
-    it"; the working marker persists until the turn ends, since it reflects the
-    agent actually being busy.
+    caller signals each new attention event before clearing the marker (and so
+    the dot) when any pane showing the session is focused. The working marker
+    persists until the turn ends, since it reflects the agent actually being
+    busy.
 
     A daemon-hosted session registers with no pane (no TMUX_PANE at hook time),
     so it is associated by matching its title (session_meta) against each pane's
@@ -349,7 +362,7 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles)
         work_marker = os.path.join(WORKING, name)
 
         def prune():
-            for stale in (path, attn_marker, work_marker, os.path.join(NOTIFIED, name)):
+            for stale in (path, attn_marker, work_marker):
                 try:
                     os.unlink(stale)
                 except OSError:
@@ -416,14 +429,9 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles)
             if owner == c["id"] and pid not in matched:
                 matched.append(pid)
 
-        attention = os.path.exists(c["attn_marker"])
-        if attention and any(p in focused_panes for p in matched):
-            try:
-                os.unlink(c["attn_marker"])
-            except OSError:
-                pass
-            attention = False
-        status = "attention" if attention else ("working" if os.path.exists(c["work_marker"]) else "")
+        attention_token = _attention_token(c["attn_marker"])
+        status = "attention" if attention_token is not None else \
+                 ("working" if os.path.exists(c["work_marker"]) else "")
         # A top-level session records its color in the transcript; a teammate's
         # lives in its team config instead, so fall back to that (by pane), read
         # only for actual teammates.
@@ -436,6 +444,7 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles)
                 {"id": c["id"], "agent": c["agent"], "pane": pane, "cwd": display_cwd,
                  "label": agent_label(mode, c["title"], c["agent_name"], dir_name),
                  "window": window, "status": status,
+                 "attention_token": attention_token,
                  "color": c["color"] or team_colors.get(pane, "")}
             )
 
@@ -450,6 +459,29 @@ def fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles)
         for pid in matched:
             place(pid, pane_to_window[pid])
     return sessions
+
+
+def acknowledge_focused_attention(sessions, focused_panes):
+    """Clear focused sessions' attention only after their signal was handled."""
+    focused = {}
+    for s in sessions:
+        token = s["attention_token"]
+        if token is not None and s["pane"] in focused_panes:
+            focused[s["id"]] = token
+
+    for sid, token in focused.items():
+        marker = os.path.join(ATTENTION, sid)
+        if _attention_token(marker) != token:
+            continue
+        try:
+            os.unlink(marker)
+        except OSError:
+            continue
+        status = "working" if os.path.exists(os.path.join(WORKING, sid)) else ""
+        for s in sessions:
+            if s["id"] == sid and s["attention_token"] == token:
+                s["attention_token"] = None
+                s["status"] = status
 
 
 def read_selection():
@@ -492,22 +524,44 @@ def _client_ttys():
     return [t for t in out.split("\n") if t.strip()]
 
 
-def notify_attention(sessions, bell_on, osc_mode):
-    """Ring the bell / raise a desktop notification once per attention episode.
+def _claim_attention(session_id, token):
+    """Atomically claim a newer attention event across all sidebar processes."""
+    try:
+        os.makedirs(NOTIFIED, exist_ok=True)
+        path = os.path.join(NOTIFIED, session_id)
+        existed = os.path.exists(path)
+        with open(path, "a+") as flag:
+            fcntl.flock(flag, fcntl.LOCK_EX)
+            flag.seek(0)
+            previous = flag.read().strip()
+            previous_token = int(previous) if previous.isdigit() else \
+                             os.fstat(flag.fileno()).st_mtime_ns if existed else 0
+            if token <= previous_token:
+                return False
+            flag.seek(0)
+            flag.truncate()
+            flag.write(str(token))
+            flag.flush()
+            return True
+    except OSError:
+        return False
 
-    Reacts to the same attention state as the `●` row indicator: a session is
-    signalled while it holds an attention marker. fetch_agent_sessions has already
-    cleared that marker for a session whose pane is focused, so one you are
-    looking at never fires ("wanted you while you weren't looking"). Firing from
+
+def notify_attention(sessions, bell_on, osc_mode):
+    """Ring the bell / raise a desktop notification once per attention event.
+
+    Every new attention event is signalled before focus acknowledges and clears
+    its marker, because these signals are intended for a terminal that may be in
+    the background; pane focus does not imply terminal visibility. Firing from
     the poll loop means nothing signals while the sidebar is off.
 
     Dedup: there is one sidebar per window, all polling, and a session can be
-    placed under several windows at once - so the fire is gated on an atomic
-    create of a per-session-id flag under NOTIFIED. Exactly one sidebar wins per
-    episode; the flag is pruned once the episode ends (its attention marker gone),
-    rearming the next one. The bell writes BEL to the session's pane tty (so tmux
-    applies its own monitor-bell); the notification writes the OSC escape to each
-    client tty. Both best-effort.
+    placed under several windows at once - so the fire is gated by a locked
+    per-session flag containing the newest event token. Exactly one sidebar wins
+    each event, including consecutive events whose pane is already focused. The
+    bell writes BEL to the session's pane tty (so tmux applies its own
+    monitor-bell); the notification writes the OSC escape to each client tty.
+    Both best-effort.
     """
     # One representative placement per session id, preferring the one under the
     # active window (whose name titles the notification). Only sessions visible in
@@ -515,26 +569,16 @@ def notify_attention(sessions, bell_on, osc_mode):
     # no pane to bell and no window to name.
     attention = {}
     for s in sessions:
-        if s["status"] != "attention" or s["window"] is None:
+        if s["attention_token"] is None or s["window"] is None:
             continue
         cur = attention.get(s["id"])
         if cur is None or (s["window"]["active"] and not cur["window"]["active"]):
             attention[s["id"]] = s
 
     if bell_on or osc_mode:
-        try:
-            os.makedirs(NOTIFIED, exist_ok=True)
-        except OSError:
-            attention = {}  # can't dedup safely, so skip firing (still prune below)
         for sid, s in attention.items():
-            try:
-                fd = os.open(os.path.join(NOTIFIED, sid),
-                             os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            except FileExistsError:
-                continue  # another sidebar, or an earlier poll, already fired
-            except OSError:
+            if not _claim_attention(sid, s["attention_token"]):
                 continue
-            os.close(fd)
             if osc_mode:
                 win = s["window"]["name"]
                 text = f"{win} · {s['label']}" if s["label"] else win
@@ -547,19 +591,23 @@ def notify_attention(sessions, bell_on, osc_mode):
             if bell_on and s["pane"]:
                 _write_tty(tmux("display-message", "-p", "-t", s["pane"], "#{pane_tty}").strip(), "\a")
 
-    # Prune flags whose episode has ended (no attention marker), rearming the next
-    # attention on that session. Runs even when disabled, so a disable/enable
-    # cycle starts clean. Sessions still in attention this poll keep their flag.
+    # Keep the latest token while a session lives, so a stale poll can never
+    # reclaim an older event after focus clears its marker. Retired session flags
+    # are removed after a grace period longer than any in-flight poll.
     try:
         flags = os.listdir(NOTIFIED)
     except OSError:
         flags = []
+    now = time.time()
     for name in flags:
-        if name not in attention and not os.path.exists(os.path.join(ATTENTION, name)):
-            try:
-                os.unlink(os.path.join(NOTIFIED, name))
-            except OSError:
-                pass
+        path = os.path.join(NOTIFIED, name)
+        if os.path.exists(os.path.join(REGISTRY, name)):
+            continue
+        try:
+            if now - os.path.getmtime(path) >= 5:
+                os.unlink(path)
+        except OSError:
+            pass
 
 
 # pane_pb_state values that mean "no progress to show": `hidden` (a pane that
@@ -935,10 +983,11 @@ def main(stdscr):
             # The focused pane is the active pane of the active window; a session
             # there has its attention dot cleared.
             focused_panes = {p["id"] for w in windows if w["active"] for p in w["panes"] if p["active"]}
-            sessions = fetch_agent_sessions(pane_to_window, focused_panes, pane_paths, pane_titles)
+            sessions = fetch_agent_sessions(pane_to_window, pane_paths, pane_titles)
             # Ring the bell / raise the desktop notification for sessions newly
-            # needing attention (deduped across every window's sidebar).
+            # needing attention before focus acknowledges the event.
             notify_attention(sessions, bell_enabled(), osc_notify_mode())
+            acknowledge_focused_attention(sessions, focused_panes)
             # Mirror each pane's agent turn-state into the window tree: attention
             # wins over working, matching fetch_agent_sessions' own precedence.
             pane_status = {}

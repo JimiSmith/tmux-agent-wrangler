@@ -309,9 +309,9 @@ not understand the chosen one silently ignores it. Either way `<window>` /
 through tmux, so the notification arrives whatever window you are on.
 
 Both signals are raised by the sidebar as it polls, so they need the sidebar
-toggled on, and — like the `●` indicator — they fire only when you are not
-already looking at that agent's pane (focusing it clears the pending attention
-instead).
+toggled on. They fire for every attention event regardless of which pane is
+focused: pane focus says nothing about whether the terminal itself is visible.
+The `●` indicator still clears when you focus the agent's pane.
 
 For the selection highlight to follow focus the moment it changes rather than
 on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:

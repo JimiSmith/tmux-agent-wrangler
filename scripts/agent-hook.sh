@@ -19,7 +19,7 @@ event="${2:-start}"
 input="$(cat || true)"
 
 parsed="$(printf '%s' "$input" | python3 -c '
-import json, sys
+import json, sys, time
 d = json.load(sys.stdin)
 transcript = d.get("transcript_path") or d.get("transcriptPath") or ""
 session_id = d.get("session_id") or d.get("sessionId") or ""
@@ -28,12 +28,14 @@ print(d.get("cwd", ""))
 print(transcript)
 recoverable = d.get("recoverable")
 print("true" if recoverable is True else "false" if recoverable is False else "")
+print(time.time_ns())
 ' 2>/dev/null || true)"
 
 session_id="$(printf '%s' "$parsed" | sed -n 1p)"
 session_id="${session_id//\//_}"
 [ -z "$session_id" ] && exit 0
 recoverable="$(printf '%s' "$parsed" | sed -n 4p)"
+attention_token="$(printf '%s' "$parsed" | sed -n 5p)"
 if [ "$event" = "error" ]; then
   if [ "$agent" = "copilot" ] && [ "$recoverable" = "true" ]; then
     event="working"
@@ -151,7 +153,7 @@ if [ "$event" = "needsAttention" ]; then
   ensure_registered
   [ -f "$REGISTRY/$agent-$session_id" ] || exit 0
   mkdir -p "$ATTENTION"
-  : > "$ATTENTION/$agent-$session_id"
+  printf '%s\n' "$attention_token" > "$ATTENTION/$agent-$session_id"
   rm -f "$WORKING/$agent-$session_id"
   exit 0
 fi

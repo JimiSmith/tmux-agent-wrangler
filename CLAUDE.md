@@ -124,17 +124,17 @@ independent instances behaving as one.
   - **Attention signals** (`notify_attention`): the bell (`@wrangler-bell`) and
     the OSC desktop notification (`@wrangler-osc-notify`: `off` | `777`/`on` |
     `9`) are raised here off the poll, not by the hook — reacting to the same
-    attention state as the `●` glyph, so a session whose pane is focused (marker
-    already cleared by `fetch_agent_sessions`) never fires. This is what lets a
-    daemon-hosted session signal at all: the hook has no pane for it, but the
-    sidebar resolves one via title matching. Because there is one sidebar per
-    window (and a session can sit under several windows), the fire is gated on an
-    atomic create of a `notified/<id>` flag, so exactly one sidebar signals per
-    episode; the flag is pruned once the attention marker is gone, rearming the
-    next. The notification (built as `<window> · <label>`, OSC 777 also carrying
-    the agent name as its title) goes to each client tty of this tmux session; the
-    bell writes BEL to the matched pane's tty. With the sidebar off, nothing
-    signals.
+    attention events before focus clears the `●` glyph. Pane focus does not gate
+    either signal because it says nothing about whether the terminal is visible.
+    This is what lets a daemon-hosted session signal at all: the hook has no pane
+    for it, but the sidebar resolves one via title matching. Because there is one
+    sidebar per window (and a session can sit under several windows), each
+    attention marker carries a monotonic event token and a locked
+    `notified/<id>` flag records the latest token, so exactly one sidebar signals
+    each event. The notification (built as `<window> · <label>`, OSC 777 also
+    carrying the agent name as its title) goes to each client tty of this tmux
+    session; the bell writes BEL to the matched pane's tty. With the sidebar off,
+    nothing signals.
   - **Width sync** (`@wrangler-sync-width`, `@wrangler-min-width`): the
     trickiest code. It distinguishes a *user* resize (clamp to the floor,
     publish to the `width` file for other sidebars to adopt) from tmux
@@ -171,9 +171,10 @@ independent instances behaving as one.
   a no-op outside tmux (no `TMUX_PANE`), and the marker branches re-check the
   record exists after ensuring registration, so an agent running outside a tmux
   pane still leaves no orphan. The
-  sidebar renders an animated spinner for working and `●` for attention, and deletes the
-  attention marker once its pane is focused (the working marker persists until
-  the turn ends). Recoverable Copilot errors remain working. Copilot subagents
+  sidebar renders an animated spinner for working and `●` for attention. It
+  signals each attention event before deleting the marker when its pane is
+  focused (the working marker persists until the turn ends). Recoverable Copilot
+  errors remain working. Copilot subagents
   are not separately interactive sessions, so their lifecycle events only keep
   the parent working and never create their own sidebar rows. `sidebar.py`
   prunes any registry entry (and both markers)
