@@ -92,18 +92,29 @@ independent instances behaving as one.
     because one session can be placed under several windows at once (see agent
     association), and `main`'s nav/activate assume unique keys.
   - **Agent association** (`fetch_agent_sessions`): a session's registry record
-    carries the pane captured at hook time, but a daemon-hosted (background)
-    session has none — no `TMUX_PANE` when its hook ran, and no process/env link
-    back to a pane. Such a session is associated by matching its title
-    (`session_meta`) against each pane's live title (`pane_titles` from
-    `fetch_windows`, glyph-stripped by `strip_status_prefix`): Claude Code sets
-    the pane title to the session title however the session is viewed (`claude
-    attach`, `--resume`, or the agents view), so a match means that pane is
-    displaying the session. A session is filed under the window of *every* pane
-    showing it (recorded-if-local ∪ title-matched), so it can appear under two
-    windows; one shown nowhere stays detached under "Agents". Title collisions
-    are broken by the recorded pane then the cwd, and left unassigned if still
-    ambiguous (better no jump than a wrong one); empty titles never match.
+    carries the pane captured at hook time, but that pane counts as a placement
+    only when the agent actually occupies it (`process_under`: the recorded pid
+    descends from the pane's top-level process `#{pane_pid}`, walking a `ps`
+    pid->ppid snapshot). A process launched from a tmux shell into a detached/GUI
+    host (a VSCode extension session, a disowned daemon) inherits `TMUX_PANE`
+    without living in that pane, and the id can later be freed for other use or,
+    across a server restart, reused, so an inherited id must not pin the session
+    to whatever now holds it (legacy 2-field records have no pid to verify and
+    are trusted for back-compat). Ancestry (not the controlling tty) is used so
+    the check needs no `/proc`, working on macOS as well as Linux.
+    A daemon-hosted (background) session records no pane at all — no `TMUX_PANE`
+    when its hook ran, and no process/env link back to a pane — so it is
+    associated by matching its title (`session_meta`) against each pane's live
+    title (`pane_titles` from `fetch_windows`, glyph-stripped by
+    `strip_status_prefix`): Claude Code sets the pane title to the session title
+    however the session is viewed (`claude attach`, `--resume`, or the agents
+    view), so a match means that pane is displaying the session. A session is
+    filed under the window of *every* pane showing it (recorded-if-occupied ∪
+    title-matched), so it can appear under two windows; one shown in no local
+    pane is dropped entirely (not listed detached) and reappears the instant a
+    pane shows it. Title collisions are broken by the recorded pane then the cwd,
+    and left unassigned if still ambiguous (better no jump than a wrong one);
+    empty titles never match.
   - **Progress indicators** (`progress_indicator`): a single glyph/percentage
     pinned to each row's right edge, from two independently-toggled sources.
     `@wrangler-hook-progress` (default on) draws the hook turn state (an animated
