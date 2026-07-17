@@ -24,13 +24,14 @@
     "target": "~/.copilot/hooks/wrangler.json",
     "format": "copilot",
     "events": {
-      "sessionStart": ["start", "working"],
+      "sessionStart": ["start"],
       "userPromptSubmitted": ["working"],
       "agentStop": ["needsAttention"],
       "errorOccurred": ["needsAttention"],
-      "notification": ["needsAttention"],
-      "permissionRequest": ["needsAttention"],
-      "sessionEnd": ["needsAttention"]
+      "notification": [
+        { "matcher": "permission_prompt|elicitation_dialog", "actions": ["needsAttention"] }
+      ],
+      "sessionEnd": ["end"]
     }
   }
 }

@@ -179,8 +179,7 @@ Create `~/.copilot/hooks/wrangler.json`:
   "version": 1,
   "hooks": {
     "sessionStart": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot start" },
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot start" }
     ],
     "userPromptSubmitted": [
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
@@ -192,31 +191,30 @@ Create `~/.copilot/hooks/wrangler.json`:
       { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
     ],
     "notification": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
-    ],
-    "permissionRequest": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
+      {
+        "type": "command",
+        "matcher": "permission_prompt|elicitation_dialog",
+        "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention"
+      }
     ],
     "sessionEnd": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
+      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot end" }
     ]
   }
 }
 ```
 
-Copilot CLI fires its lifecycle hooks per prompt-cycle rather than per session
-([copilot-cli#991](https://github.com/github/copilot-cli/issues/991)). So:
+Copilot CLI fires `sessionStart` once when a new or resumed session begins and
+`sessionEnd` once when it terminates. They register and unregister the sidebar
+row respectively; PID pruning remains a backstop for crashes that skip the end
+hook. `userPromptSubmitted` marks the turn working, while `agentStop` and
+`errorOccurred` mark it as needing attention.
 
-- a session only appears in the sidebar once its first message is sent
-  (`sessionStart` does not fire at launch);
-- `sessionStart` doubles as the turn-start signal, so it maps to both `start`
-  (register) and `working` — `start` first, so the session is registered
-  before `working` marks it. `userPromptSubmitted` also maps to `working`;
-- the turn-ending events (`agentStop`, `errorOccurred`, `notification`,
-  `permissionRequest`, `sessionEnd`) all map to `needsAttention`, never `end`:
-  firing per prompt-cycle, an `end` would remove the session after every
-  response. No `end` is wired at all, so session cleanup relies on PID pruning
-  instead.
+`permissionRequest` is deliberately not an attention signal: it runs before
+Copilot's permission rules for every applicable tool call, including calls that
+are allowed without prompting the user. The matched `notification` hook instead
+reacts only when Copilot actually displays a permission prompt or elicitation
+dialog.
 
 ## Options
 

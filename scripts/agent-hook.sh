@@ -49,8 +49,7 @@ register_session() {
   transcript="$(printf '%s' "$parsed" | sed -n 3p)"
 
   # Find the agent process among our ancestors so the sidebar can prune the
-  # entry when it exits. Needed because not every agent fires sessionEnd
-  # reliably (Copilot CLI fires it per prompt-cycle; see README).
+  # entry if an end hook is skipped, for example when the agent crashes.
   agent_pid=""
   pid=$$
   for _ in 1 2 3 4 5 6 7 8; do

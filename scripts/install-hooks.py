@@ -44,8 +44,7 @@ def groups(value):
 
     Two forms are accepted: a list of action strings (one group, no matcher) or
     a list of {"matcher": ..., "actions": [...]} objects (one group each, the
-    matcher optional). Matchers only apply to the Claude config; the Copilot
-    renderer flattens the actions and ignores them.
+    matcher optional). Each config renderer emits matchers in its native shape.
     """
     if value and isinstance(value[0], dict):
         return [(g.get("matcher"), g["actions"]) for g in value]
@@ -154,8 +153,12 @@ def install_copilot(agent, spec, uninstall):
         "version": 1,
         "hooks": {
             event: [
-                {"type": "command", "bash": command(agent, action)}
-                for _, actions in groups(value)
+                {
+                    "type": "command",
+                    **({"matcher": matcher} if matcher is not None else {}),
+                    "bash": command(agent, action),
+                }
+                for matcher, actions in groups(value)
                 for action in actions
             ]
             for event, value in spec["events"].items()

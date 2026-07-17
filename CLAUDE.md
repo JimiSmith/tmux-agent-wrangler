@@ -150,17 +150,17 @@ independent instances behaving as one.
   on stdin (parses both Claude Code snake_case and Copilot CLI camelCase). The
   registry record is `pane<TAB>agent<TAB>pid<TAB>cwd<TAB>transcript`; it walks
   the process ancestry to find the agent's PID so the sidebar can prune the
-  entry when the
-  process dies. This PID-pruning exists because not every agent fires a reliable
-  `end` event (Copilot CLI fires hooks per prompt-cycle, so its `sessionEnd`
-  maps to `needsAttention`, not `end` — see README). `working` (Claude Code's
+  entry when the process dies, as a backstop for crashes that skip an end hook.
+  `working` (Claude Code's
   `UserPromptSubmit` plus the resume signals `PostToolUse` / `PostToolUseFailure`
-  / `PostToolBatch` / `SubagentStart`; Copilot's per-cycle `sessionStart`) and
+  / `PostToolBatch` / `SubagentStart`; Copilot's `userPromptSubmitted`) and
   `needsAttention` (Claude Code's `Stop` / `StopFailure` / `PermissionRequest`,
   the `idle_prompt` and `elicitation_dialog` `Notification` types, and a
   `PreToolUse` matcher for the `AskUserQuestion` / `ExitPlanMode` interactive
-  tools; Copilot's `sessionEnd`) each write their marker and delete the other's,
-  so the two are mutually exclusive. Every event (`start`, `working`,
+  tools; Copilot's `agentStop`, `errorOccurred`, and matched `permission_prompt`
+  / `elicitation_dialog` notifications) each write their marker and delete the
+  other's, so the two are mutually exclusive. Copilot's `sessionStart` registers
+  the session and `sessionEnd` unregisters it. Every event (`start`, `working`,
   `needsAttention`) self-registers the session first via `register_session` if
   its registry record is missing, so a session whose `start` was missed — most
   visibly a resumed Claude Code session, where SessionStart does not re-create
@@ -190,8 +190,8 @@ independent instances behaving as one.
   of `event -> [action]` mappings — wiring the absolute path to this repo's
   `agent-hook.sh`. An event value is either a list of action strings (one hook
   group, no matcher) or a list of `{matcher, actions}` objects (one group each);
-  matchers are Claude-only (the `claude` format emits them; the `copilot` format
-  flattens the actions and drops the matcher). Two `format`s: `claude` merges non-destructively into the
+  each format emits matchers in its agent-specific config shape. Two `format`s:
+  `claude` merges non-destructively into the
   shared `~/.claude/settings.json` (replacing only wrangler's own hook groups,
   keyed on the `agent-hook.sh` command, preserving mode and a `.wrangler.bak`
   backup); `copilot` writes the dedicated `~/.copilot/hooks/wrangler.json` it
