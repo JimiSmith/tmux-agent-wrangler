@@ -947,9 +947,10 @@ def main(stdscr):
     # (including the selection) differing from what was last painted - so an idle
     # sidebar loops at the tick rate but rebuilds and repaints no more than the
     # poll cadence.
-    POLL_INTERVAL = 1.0    # seconds between tmux data polls
-    ANIM_INTERVAL = 0.125  # seconds between spinner frame advances
-    TICK_MS = 50           # getch timeout; the fixed loop cadence
+    POLL_INTERVAL = 1.0     # seconds between tmux data polls
+    ANIM_INTERVAL = 0.0625  # seconds between spinner frame advances (~16 fps)
+    TICK_MS = 16            # getch timeout / loop cadence; also the ceiling on
+                            # the frame rate, since a tick repaints at most once
 
     selected_key = None
     offset = 0
