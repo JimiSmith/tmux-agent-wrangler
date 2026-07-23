@@ -128,10 +128,13 @@ independent instances behaving as one.
     the agents section. `draw()` gives the indicator its own color pair (green/
     yellow/red per state) so it stands out from the row's own color. The busy
     glyph (hook `working`, OSC `indeterminate`) is a spinner (`spinner_frame`):
-    `main` advances a `frame` counter on a sub-second timer independent of the
-    1s data poll — between polls it only re-runs `build_rows` on the cached poll
-    data and repaints, and the fast timer engages only while a spinner is on
-    screen, so an idle sidebar still just blocks for the poll interval.
+    `main` loops on a fixed tick and advances a `frame` counter on the wall clock
+    (`ANIM_INTERVAL`) independent of the 1s data poll. `build_rows` runs only on a
+    poll or on a frame advance while a spinner is on screen — other ticks reuse
+    the built rows — and a redraw happens only when the tick is dirty (input, an
+    advanced frame while a spinner is on screen, or a changed poll snapshot), so
+    an idle sidebar loops at the tick rate but rebuilds and repaints no more than
+    the poll cadence.
   - **Attention signals** (`notify_attention`): the bell (`@wrangler-bell`) and
     the OSC desktop notification (`@wrangler-osc-notify`: `off` | `777`/`on` |
     `9`) are raised here off the poll, not by the hook — reacting to the same

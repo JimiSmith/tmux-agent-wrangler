@@ -937,15 +937,19 @@ def main(stdscr):
     set_focus_reporting(True)
     atexit.register(set_focus_reporting, False)
 
-    # The data poll (tmux queries, width sync, shared selection) runs at
-    # POLL_INTERVAL; the spinner animates faster, so between polls we only
-    # advance the frame and repaint the rows rebuilt from the cached poll data.
-    # Any real input - a key, a focus report, a resize - forces a fresh poll, so
-    # focus/selection stay as responsive as the old per-tick fetch. The fast
-    # timer is used only while a spinner is on screen; an idle sidebar keeps
-    # blocking for POLL_INTERVAL as before.
-    POLL_INTERVAL = 1.0
-    ANIM_INTERVAL_MS = 125
+    # The loop runs on a fixed TICK so redraw, input, and animation are
+    # decoupled. The data poll (tmux queries, width sync, shared selection,
+    # notifications) runs every POLL_INTERVAL or right after input; the spinner
+    # frame advances every ANIM_INTERVAL on the wall clock. build_rows runs only
+    # on a poll or on a frame advance while a spinner is on screen; other ticks
+    # reuse the built rows. A redraw happens only when something changed - a
+    # keypress, an advanced frame while a spinner is on screen, or a poll snapshot
+    # (including the selection) differing from what was last painted - so an idle
+    # sidebar loops at the tick rate but rebuilds and repaints no more than the
+    # poll cadence.
+    POLL_INTERVAL = 1.0    # seconds between tmux data polls
+    ANIM_INTERVAL = 0.125  # seconds between spinner frame advances
+    TICK_MS = 50           # getch timeout; the fixed loop cadence
 
     selected_key = None
     offset = 0
@@ -957,12 +961,53 @@ def main(stdscr):
     relayout_grace = 0
     frame = 0
     last_poll = 0.0
+    last_frame = 0.0
     force_poll = True
     cached = None
+    last_painted = None
+    animating = False
+    rows = []
+    items = []
+    keys = []
 
+    stdscr.timeout(TICK_MS)
     while True:
+        ch = stdscr.getch()
         now = time.monotonic()
-        if force_poll or cached is None or now - last_poll >= POLL_INTERVAL - 0.1:
+        input_detected = ch != -1
+        if input_detected:
+            force_poll = True
+            # Handle input against the rows/keys/items/offset currently on screen
+            # (the previous build); a poll forced this tick rebuilds them after.
+            if ch in (ord("q"), ord("Q")):
+                # Close every sidebar, not just this one. The server must run the
+                # toggle: a child of this pane would be killed along with it.
+                tmux("run-shell", "-b", os.path.join(os.path.dirname(os.path.abspath(__file__)), "toggle.sh"))
+                return
+            elif keys and ch in (curses.KEY_UP, ord("k")):
+                selected_key = keys[max(0, keys.index(selected_key) - 1)]
+                write_selection(selected_key)
+            elif keys and ch in (curses.KEY_DOWN, ord("j")):
+                selected_key = keys[min(len(keys) - 1, keys.index(selected_key) + 1)]
+                write_selection(selected_key)
+            elif keys and ch in (curses.KEY_ENTER, 10, 13):
+                activate(items[keys.index(selected_key)])
+            elif rows and ch == curses.KEY_MOUSE:
+                try:
+                    _, _, my, _, bstate = curses.getmouse()
+                except curses.error:
+                    bstate, my = 0, -1
+                if bstate & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
+                    row_idx = my + offset
+                    if 0 <= row_idx < len(rows) and isinstance(rows[row_idx][1], dict):
+                        selected_key = rows[row_idx][1]["key"]
+                        write_selection(selected_key)
+                        activate(rows[row_idx][1])
+            # KEY_RESIZE needs no branch: input_detected marks the tick dirty and
+            # draw recomputes offset and size from the new dimensions.
+
+        polled = False
+        if force_poll or cached is None or now - last_poll >= POLL_INTERVAL:
             force_poll = False
             last_poll = now
             windows, pane_to_window, sidebars, pane_paths, pane_progress, pane_titles, pane_pids, sidebar_active = fetch_windows()
@@ -1045,53 +1090,36 @@ def main(stdscr):
             hook_on = hook_progress_enabled()
             osc_on = osc_progress_enabled()
             cached = (windows, sessions, pane_progress, pane_status, hook_on, osc_on, has_focus)
+            polled = True
 
+        frame_advanced = now - last_frame >= ANIM_INTERVAL
+        if frame_advanced:
+            last_frame = now
+            frame += 1
+
+        # Rebuild only when build_rows' inputs can have changed: a poll (new
+        # cached data / selection) or a frame advance while a spinner is on
+        # screen. Idle ticks reuse the persisted rows/keys/items/animating, which
+        # still match the screen, so input handled at the top of a later tick
+        # indexes valid lists. The cached unpack is pure name binding (it supplies
+        # has_focus for draw) and stays outside the gate.
         windows, sessions, pane_progress, pane_status, hook_on, osc_on, has_focus = cached
-        rows = build_rows(windows, sessions, pane_progress, pane_status, hook_on, osc_on, frame)
-        items = [item for _, item in rows if isinstance(item, dict)]
-        keys = [item["key"] for item in items]
-        if selected_key not in keys:
-            selected_key = next(
-                (item["key"] for item in items if item["kind"] == "window" and item["win"]["active"]), keys[0]
-            )
-        offset = draw(stdscr, rows, selected_key, offset, has_focus)
+        need_build = polled or (frame_advanced and animating)
+        if need_build:
+            rows = build_rows(windows, sessions, pane_progress, pane_status, hook_on, osc_on, frame)
+            items = [item for _, item in rows if isinstance(item, dict)]
+            keys = [item["key"] for item in items]
+            if selected_key not in keys:
+                selected_key = next(
+                    (item["key"] for item in items if item["kind"] == "window" and item["win"]["active"]), keys[0]
+                )
+            animating = any(isinstance(it, dict) and it.get("indicator") in _SPINNER_FRAMES for _, it in rows)
 
-        # Tick fast only while a spinner glyph is on screen, so an idle sidebar
-        # still just blocks for the poll interval.
-        animating = any(isinstance(it, dict) and it.get("indicator") in _SPINNER_FRAMES for _, it in rows)
-        stdscr.timeout(ANIM_INTERVAL_MS if animating else int(POLL_INTERVAL * 1000))
-
-        ch = stdscr.getch()
-        frame += 1
-        if ch != -1:
-            force_poll = True
-        if ch == curses.KEY_RESIZE:
-            continue
-        if ch in (ord("q"), ord("Q")):
-            # Close every sidebar, not just this one. The server must run the
-            # toggle: a child of this pane would be killed along with it.
-            tmux("run-shell", "-b", os.path.join(os.path.dirname(os.path.abspath(__file__)), "toggle.sh"))
-            return
-        if ch in (curses.KEY_UP, ord("k")):
-            selected_key = keys[max(0, keys.index(selected_key) - 1)]
-            write_selection(selected_key)
-        elif ch in (curses.KEY_DOWN, ord("j")):
-            selected_key = keys[min(len(keys) - 1, keys.index(selected_key) + 1)]
-            write_selection(selected_key)
-        elif ch in (curses.KEY_ENTER, 10, 13):
-            activate(items[keys.index(selected_key)])
-        elif ch == curses.KEY_MOUSE:
-            try:
-                _, _, my, _, bstate = curses.getmouse()
-            except curses.error:
-                continue
-            if not bstate & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
-                continue
-            row_idx = my + offset
-            if 0 <= row_idx < len(rows) and isinstance(rows[row_idx][1], dict):
-                selected_key = rows[row_idx][1]["key"]
-                write_selection(selected_key)
-                activate(rows[row_idx][1])
+        snapshot = (cached, selected_key)
+        dirty = input_detected or (frame_advanced and animating) or snapshot != last_painted
+        if dirty:
+            offset = draw(stdscr, rows, selected_key, offset, has_focus)
+            last_painted = snapshot
 
 
 if __name__ == "__main__":
