@@ -1,0 +1,12 @@
+[package]
+name = "wrangler-tui-prototype"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone ratatui prototype of the tmux-agent-wrangler sidebar (mock data, no daemon/tmux)"
+
+[[bin]]
+name = "wrangler-prototype"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.30"
