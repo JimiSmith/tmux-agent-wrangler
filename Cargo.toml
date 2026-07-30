@@ -1,0 +1,15 @@
+[package]
+name = "wrangler"
+version = "0.1.0"
+edition = "2021"
+description = "tmux-agent-wrangler: a tmux sidebar for AI-agent sessions (Rust rewrite)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Ordered map for the deterministic-iteration parity requirement (registry
+# order, title-collision tiebreaks, notification order).
+indexmap = { version = "2", features = ["serde"] }
+
+# tokio + ratatui + crossterm are added in the integration phase (WF3); the
+# pure-logic modules ported in WF2 need only serde.
