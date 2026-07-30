@@ -17,9 +17,11 @@ still holds.
 
 ## Components
 
-- **daemon** (single, always-on). Started at plugin load; persists even when the
-  sidebar is toggled off. The only process that talks to tmux or reads
-  transcripts. Owns all state in memory: the agent-session registry, each
+- **daemon** (single, always-on, multi-tenant across tmux servers; see
+  Multi-server model). Started at plugin load and detached from the spawning
+  server so it outlives it; persists even when the sidebar is toggled off. The
+  only process that talks to tmux or reads transcripts. Owns all state in
+  memory: the agent-session registry, each
   session's turn state (working/attention), the shared selection, the width
   target, and the attention-dedup set. Runs one global tmux poll (a later phase
   may add control-mode push), computes association/labels/colors/rows once,
@@ -46,16 +48,50 @@ independent processes each polling tmux and the filesystem.
 
 hooks + tmux events -> daemon (authoritative state) -> diff -> push `RowModel`
 -> the affected window's client. Selection and width are daemon state broadcast
-to every client. Attention dedup is a single in-memory check. Turn-state and
-notifications become push-immediate (sub-100ms) instead of up-to-1s poll-driven.
+to a server's clients. Attention dedup is a single in-memory check. Turn-state
+and notifications become push-immediate (sub-100ms) instead of up-to-1s
+poll-driven.
+
+## Multi-server model
+
+One daemon serves every tmux server, because the one piece of genuinely global
+state, the agent-session registry, has no server affinity: a daemon-hosted
+(pane-less) Claude session is located only by title-matching against whatever
+panes show it, on whichever server. Keeping that registry, the title-matching,
+and the notification dedup in one process avoids the cross-process flock
+coordination that per-server daemons would need for exactly that case.
+
+The price is that the daemon is explicitly multi-tenant and never leans on an
+ambient `$TMUX`:
+
+- **Server identity is the `$TMUX` socket path** (its first field). Every client
+  and hook reports it (`Hello`/`HookEvent`); a pane-less hook reports none and
+  its session is title-matched across all connected servers.
+- **Every tmux command is issued with `-S <socket>`** for the target server; the
+  daemon never runs a bare `tmux`. The daemon is detached (setsid/double-fork) so
+  it survives the exit of whichever server first spawned it.
+- **All tmux-facing state is keyed by `(server, ...)`.** Pane ids are per-server
+  (`%5` in one server is not `%5` in another), so associations, the row model,
+  and pushes partition by server socket. The registry stays global; *placement*
+  is per-server via pane/title matching.
+- **Selection and width are per tmux server:** shared among that server's
+  sidebars, independent across servers. This fixes today's latent global-file
+  coupling (two servers sharing one cursor/width).
+- **toggle / focus / notify target the requesting server:** ctl reports its
+  socket; the daemon spawns/kills/focuses panes and writes notifications on that
+  server only.
+- **Singleton across servers:** the first server to load the plugin spawns the
+  daemon; every other server's `tmux-entry` finds the socket already bound and
+  just connects. A server exiting (its socket/commands go dead, which the
+  fail-soft `run_tmux` reads as empty) drops that server's partition.
 
 ## File-state: dropped vs kept
 
 Dropped (replaced by in-memory daemon state + the socket):
 
 - `attention/`, `working/` (turn markers) -> in-memory per-session status
-- `selection` (shared row) -> daemon state, pushed to clients
-- `width` (shared width) -> daemon state, pushed to clients
+- `selection` (shared row) -> daemon state, per server, pushed to that server's clients
+- `width` (shared width) -> daemon state, per server, pushed to that server's clients
 - `notified/` + flock (single-fire dedup) -> in-memory dedup map
 
 Kept:
@@ -77,9 +113,12 @@ src/model.rs       shared domain types: Window, Pane, Session, RowModel, RowKey,
                    Indicator, ProgressState. MUST land first (WF1's #1 blocker:
                    the pure band references these types but WF1 never homed them).
 src/proto.rs       WIRE protocol (client<->daemon, hook->daemon, ctl->daemon):
-                   message enums + newline-delimited JSON framing. AND the
-                   registry snapshot serialize/parse, including the legacy
-                   2-field read. NOT the old marker/selection/width files.
+                   message enums + newline-delimited JSON framing. Hello,
+                   HookEvent, and ctl messages carry the sender's tmux server
+                   socket (from $TMUX) so the daemon can scope state and target
+                   tmux commands per server. AND the registry snapshot
+                   serialize/parse, including the legacy 2-field read. NOT the
+                   old marker/selection/width files.
 src/color.rs       palette tables + rgb_to_ansi256 + read_theme + theme_palette.
                    Pure; the curses pair allocation moves into client terminal
                    setup as a crossterm equivalent.
@@ -186,6 +225,10 @@ New (client-server, become WF4 audit targets):
 - Push/diff correctness: a window's `RowModel` is pushed only when it changed.
 - Registry snapshot persistence: survive a daemon restart; still prune records
   whose pid is dead or whose pane is gone.
+- Multi-server tenancy: state keyed by `(server, ...)`, every tmux command run
+  with `-S <socket>`, no ambient `$TMUX`; a detached daemon that survives its
+  spawning server; per-server partition teardown when a server exits; pane-id
+  collisions across servers never conflated (key by `(server, pane)`).
 
 ## Build order
 
