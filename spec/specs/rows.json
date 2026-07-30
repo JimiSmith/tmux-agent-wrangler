@@ -1,0 +1,129 @@
+{
+  "module": "rows",
+  "pure": true,
+  "target_path": "src/daemon/rows.rs",
+  "functions": [
+    {
+      "name": "indicator_for",
+      "signature": "pub fn indicator_for(hook_status: &str, pb_state: &str, pb_progress: Option<u8>, hook_on: bool, osc_on: bool) -> Indicator",
+      "behavior": "Semantic half of Python progress_indicator (sidebar.py:695). Decides WHICH indicator a row carries, with no reference to the animation frame (frame resolution is deferred to the client's Indicator::resolve). Precedence: (1) if osc_on AND pb_state is an active state (not in INACTIVE_STATES = {\"\", \"hidden\"}): if pb_state == \"indeterminate\" return Progress{pct: None, state: Plain} (Plain => spinner inherits the row's own color, matching Python's `return spinner_frame(frame), None`); otherwise map pb_state via STATE_COLOR ({normal->Normal, paused->Paused, error->Error}) and ANY OTHER active state name -> Plain, then return Progress{pct: pb_progress, state}. (2) else if hook_on AND hook_status is \"working\" -> Progress{pct: None, state: Plain}; hook_status \"attention\" -> Attention. (3) else Indicator::None. This is where OSC wins over the hook glyph.",
+      "behavior_note": "",
+      "side_effects": "none (pure)",
+      "edge_cases": [
+        "pb_progress = Some(0): must render as \"0%\" (Python: `0 is not None` is true, isdigit(\"0\") true). Do NOT treat 0 as \"no progress\".",
+        "OSC active + non-indeterminate + pct None: Python returns a spinner COLORED by the state (color = STATE_COLOR.get(state)), NOT an uncolored spinner. Preserve by keeping state = Normal/Paused/Error (not Plain) so ProgressState::color() yields a color. This is the subtlest parity trap: a state=Normal pct=None spinner is GREEN, whereas an OSC-indeterminate spinner is row-colored (Plain).",
+        "Unknown active OSC state (not in {normal,paused,error,indeterminate,hidden,\"\"}): Python STATE_COLOR.get() -> None, so it renders text (pct% or spinner) in the row's own color. Map unknown active states to state=Plain, pct passed through.",
+        "INACTIVE_STATES membership is exactly {\"\", \"hidden\"}: empty string (tmux too old to know pane_pb_state) and \"hidden\" (tmux 3.7 name for cleared/no progress) both mean no OSC indicator. Do not add others.",
+        "osc_on false: OSC branch skipped entirely even if pb_state is active \u2014 falls through to the hook glyph.",
+        "hook_status is any value other than \"working\"/\"attention\" (e.g. \"\"): yields Indicator::None once the OSC branch is skipped.",
+        "Both osc_on and hook_on false: always Indicator::None."
+      ]
+    },
+    {
+      "name": "Indicator::resolve",
+      "signature": "pub fn resolve(self, frame: usize) -> (String, Option<StateColor>)",
+      "behavior": "Client/painting half of Python progress_indicator: turns a semantic Indicator into the (text, color-key) actually drawn for animation frame `frame`. None -> (\"\", None). Attention -> (\"\u25cf\", None). Progress{pct: None, state} -> (spinner_frame(frame), state.color()). Progress{pct: Some(p), state} -> (format!(\"{p}%\"), state.color()). Mirrors prototype main.rs:142.",
+      "side_effects": "none",
+      "edge_cases": [
+        "Attention glyph is the literal U+25CF \u25cf and never animates (static across frames).",
+        "Percentage text has no leading pad/sign; \"100%\" is 4 chars, \"0%\" is 2 \u2014 width feeds the right-edge reserve calc in the painter.",
+        "state.color() is None only for ProgressState::Plain; Normal/Paused/Error return the green/yellow/red state-color key. This is what makes an OSC percentage stand out from the row's own color."
+      ]
+    },
+    {
+      "name": "spinner_frame",
+      "signature": "pub fn spinner_frame(frame: usize) -> char",
+      "behavior": "Returns SPINNER[frame % SPINNER.len()]. SPINNER is the 10 braille glyphs \"\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f\" (sidebar.py:686, prototype main.rs:34). Client painting concern; the frame counter advances on the wall clock every ANIM_INTERVAL=0.0625s (~16fps) independent of the data poll.",
+      "side_effects": "none",
+      "edge_cases": [
+        "frame wraps via modulo; any usize is valid.",
+        "Each glyph is a single display column (braille) so the pinned right-edge indicator stays 1 column wide across all frames \u2014 do not substitute variable-width glyphs.",
+        "The set of spinner glyphs doubles as the \"is this row animating?\" test in the main loop (Python: `indicator in _SPINNER_FRAMES`). In the Rust split this must instead be Indicator::indeterminate() on the semantic rows, NOT a string membership test \u2014 see parity_risks."
+      ]
+    },
+    {
+      "name": "append_agent_rows",
+      "signature": "fn append_agent_rows(rows: &mut Vec<Row>, group: &[&AgentSession], window: &Window, pane_progress: &PaneProgressMap, hook_on: bool, osc_on: bool)",
+      "behavior": "Ports _append_agent_rows (sidebar.py:714). Appends one tree row per session in `group` under an already-emitted window heading. For index i (last = len-1): branch = \"\u2514\u2500\" if i==last else \"\u251c\u2500\". text = format!(\"   {branch} {label}\") \u2014 NOTE the space between branch and label (agent rows differ from pane rows, which have no space). Looks up (pb_state, pb_progress) = pane_progress.get(session.pane) defaulting to (\"\", None), computes the indicator via indicator_for(session.status, pb_state, pb_progress, hook_on, osc_on). Row carries: kind Agent{ color: session.color (name string, may be empty), emphatic: status in {attention, working} }, key = RowKey::Agent(session.id, session.pane), the window it is filed under (so the client's activate() can focus the pane displaying the session), the pane id, and the indicator. In the Python the indicator (text+color) is baked onto the item; in the daemon/client split store the semantic Indicator and resolve at paint.",
+      "side_effects": "mutates `rows` (push-only)",
+      "edge_cases": [
+        "group is never empty when called (build_rows guards with `if group.is_empty() continue`), but a single-element group => that element gets \"\u2514\u2500\".",
+        "session.pane missing from pane_progress => default (\"\", None) => inactive OSC, so the hook glyph (if any) shows. Must replicate the .get(pane, (\"\",None)) default, not panic.",
+        "emphatic (bold) is driven by hook status (attention/working), NOT by the OSC indicator; a pane that only reports OSC progress but whose session has empty status is not bold. Keep these independent.",
+        "session.color empty string \"\" must fall back to the default agent color at paint time (Python `_agent_color_pairs.get(color or \"\")` then pair 2); carry the empty name through semantically, resolve in the color module.",
+        "The agent-row key includes the pane BECAUSE one session can be placed under several windows at once (recorded-if-occupied \u222a title-matched); the pane component is what keeps keys unique so nav/activate stay well-defined."
+      ]
+    },
+    {
+      "name": "build_rows",
+      "signature": "pub fn build_rows(windows: &[Window], sessions: &[AgentSession], pane_progress: &PaneProgressMap, pane_status: &PaneStatusMap, hook_on: bool, osc_on: bool) -> Vec<Row>",
+      "behavior": "Ports build_rows (sidebar.py:736). Produces the flat semantic row list. Structure: (1) header Row text \" WINDOWS\" (leading space), then a blank Row. (2) For each window in `windows` order: a Window row text format!(\"{marker} {index}: {name}\") with marker '*' if active else ' ', kind Window{active, color(name)}, key RowKey::Window(window.id), no indicator. Then its panes: last = len-1; branch \"\u2514\u2500\"/\"\u251c\u2500\"; active '*' /' '; text format!(\"   {branch}{active}{index}: {title}\") \u2014 NO space after branch, single-char active marker glued to index; kind Pane{color(name)}, key RowKey::Pane(pane.id), indicator = indicator_for(pane_status.get(pane.id).unwrap_or(\"\"), pane.pb_state, pane.pb_progress, hook_on, osc_on). (3) For each distinct agent name in SORTED order over {s.agent for s in sessions}: push blank, header Row text format!(\" {}\", agent.to_uppercase()), blank. Then for each window in `windows` order, collect group = sessions with that agent whose window is this window; skip empty groups; emit a Window heading row with key RowKey::AgentWindow(agent, window.id) (DISTINCT from the top-section Window key for the same window) and text same as a normal window row; then append_agent_rows(group).",
+      "side_effects": "none (allocates and returns)",
+      "edge_cases": [
+        "A window with zero panes still emits its Window heading row and no pane children (Python appends nothing; last = -1 never reached).",
+        "Windows with no matching agent sessions are skipped inside each agent section (group empty) but always appear in the top WINDOWS section.",
+        "Agent section ordering is `sorted(set(agent names))` \u2014 dedup then sort by Unicode scalar order. For ASCII names (claude, copilot) Rust str Ord matches Python. Sort AFTER dedup.",
+        "Header text has a single leading space (\" WINDOWS\", \" CLAUDE\"); do not trim it \u2014 it aligns the underline/bold heading.",
+        "agent.to_uppercase(): Python str.upper(); for ASCII agent names identical. Non-ASCII agent names could diverge (Python full-casing vs Rust to_uppercase) \u2014 agent names are lowercased identifiers so unlikely, but note it.",
+        "Window identity: Python files a session under a window via `s['window'] is w` (object identity, the same dict from fetch_windows). Rust must compare by window id equality; equivalent only because window ids are unique per server. Group membership order follows the `sessions` slice order within that window.",
+        "The same physical window appears TWICE with two different keys when it hosts agents: once as RowKey::Window in the WINDOWS section and once as RowKey::AgentWindow(agent,id) in the agent section. Selection/nav treat them as separate selectable rows \u2014 this is intentional and must be preserved.",
+        "Empty `sessions` => only the WINDOWS section (header, blank, windows/panes). Empty `windows` => header \" WINDOWS\", a blank, then any agent sections will emit their header+blanks but no window groups (every group empty) \u2014 matching Python."
+      ]
+    },
+    {
+      "name": "fit",
+      "signature": "pub fn fit(text: &str, field: usize) -> String",
+      "behavior": "Ports _fit (sidebar.py:808) / prototype fit (main.rs:498). CLIENT/painting concern. Fits text to exactly `field` COLUMNS counting by chars (code points, NOT display width): field==0 -> \"\". char_count > field -> if field==1 return \"\u2026\" (U+2026) else take first field-1 chars + \"\u2026\". else left-justify: text + spaces to reach `field` chars. The right-pad is what keeps the reverse-video selection bar solid across the whole row.",
+      "side_effects": "none",
+      "edge_cases": [
+        "field == 0 returns empty string (Python `if field <= 0`; usize can't be negative, so `== 0`).",
+        "Overflow with field == 1 returns a lone \"\u2026\" (never text[:0]+\u2026).",
+        "Ellipsis is exactly one char U+2026; ensure the truncated slice length is field-1 chars so total == field chars.",
+        "Counts CHARS not grapheme/display width: a wide CJK title is counted as its char count, matching Python len(); do not switch to unicode-width here or parity with the reserve math breaks.",
+        "When text already == field, returns it unchanged (no ellipsis, no pad).",
+        "Padding must be spaces to reach `field` CHARS (Python ljust); count added spaces from char count, not byte length."
+      ]
+    }
+  ],
+  "depends_on": [
+    "tmux",
+    "assoc",
+    "labels",
+    "color",
+    "proto",
+    "client"
+  ],
+  "parity_risks": [
+    "Daemon(semantic-rows) vs client(painting) split: Python bakes the resolved indicator STRING (spinner glyph for the current frame) plus the resolved curses color pair onto each row inside build_rows/_append_agent_rows, then rebuilds every animation frame. The Rust daemon must instead emit rows carrying a SEMANTIC Indicator enum (None/Attention/Progress{pct,state}) and color NAME strings; the client resolves spinner_frame(frame), _fit, and the terminal Color at paint time. Getting this boundary wrong (baking glyphs in the daemon) forces a full row rebuild + re-serialize every 62ms.",
+    "Spinner-color subtlety: an OSC active state that is NOT indeterminate and has pb_progress==None must yield a spinner COLORED by the state (green/yellow/red), while OSC 'indeterminate' and hook 'working' yield a spinner in the ROW's own color (None). The prototype's Indicator model collapses these; preserve the distinction by mapping indeterminate/working to ProgressState::Plain and normal/paused/error to their colored states even when pct is None.",
+    "pct==0 must render '0%', not be dropped as falsy. Python guards with `is not None` and isdigit(); Option<u8>==Some(0) must survive.",
+    "INACTIVE_STATES is exactly {\"\", \"hidden\"} and 'empty title/empty state never matches' semantics: empty pb_state (old tmux) and 'hidden' both mean no OSC indicator; do not extend or shrink this set.",
+    "Row text formatting asymmetry: pane rows are format!(\"   {branch}{active}{index}: {title}\") with NO space after branch and a glued single-char active marker; agent rows are format!(\"   {branch} {label}\") WITH a space and no active marker. Easy to unify by accident and drift 1 column.",
+    "Header rows carry a single leading space (\" WINDOWS\", \" <AGENT>\") \u2014 trimming breaks alignment.",
+    "Two distinct selection keys for the same window (RowKey::Window vs RowKey::AgentWindow(agent,id)) must remain distinct, and the agent-row key must include the pane (a session can be filed under multiple windows). Collapsing keys breaks nav/activate uniqueness assumed by the client.",
+    "Agent section ordering is sorted(set(agent names)) \u2014 dedup THEN Unicode-order sort. Iterate windows in fetch_windows (tmux list-windows) order in both the top section and each agent section; group membership order follows the sessions slice.",
+    "fit counts CODE POINTS, not display columns (Python len()). The right-edge indicator reserve math in the painter (reserve = indicator_char_count + 1; draw only when field >= reserve + 1) is built on the same char-count assumption. Introducing unicode-width in one place and not the other desyncs truncation.",
+    "Window-with-zero-panes emits just its heading (Python last = len-1 = -1, loop body never runs); empty group sections are skipped via the is_empty guard \u2014 replicate both guards exactly.",
+    "'animating' detection: Python derives it by testing whether any built row's indicator string is in the spinner-glyph set. The Rust client must derive it from Indicator::indeterminate() over the semantic rows instead of a glyph-membership test, or an Attention '\u25cf' / a percentage could be misclassified.",
+    "pane_progress default: pane not present must default to (\"\", None) (inactive), never panic on a missing key.",
+    "Legacy/empty color name \"\" for an agent session must fall back to the default agent color at paint time (Python pair 2 / prototype Color::Cyan), not be treated as an error."
+  ],
+  "source_refs": [
+    "scripts/sidebar.py:736 build_rows",
+    "scripts/sidebar.py:714 _append_agent_rows",
+    "scripts/sidebar.py:695 progress_indicator",
+    "scripts/sidebar.py:690 spinner_frame",
+    "scripts/sidebar.py:808 _fit",
+    "scripts/sidebar.py:671 _INACTIVE_STATES / :679 _STATE_COLOR / :686 _SPINNER",
+    "scripts/sidebar.py:835 draw (right-edge reserve + _fit painting)",
+    "scripts/sidebar.py:1087 pane_status derivation (attention-wins-over-working precedence)",
+    "scripts/sidebar.py:1108 build gate / :1117 animating detection",
+    "scripts/sidebar.py:255 fetch_windows (pane pb_state/pb_progress source)",
+    "scripts/sidebar.py:500 fetch_agent_sessions place() (session dict: id/agent/pane/label/window/status/color)",
+    "prototype/src/main.rs:395 build_rows",
+    "prototype/src/main.rs:517 render_line",
+    "prototype/src/main.rs:498 fit",
+    "prototype/src/main.rs:142 Indicator::resolve / :157 indeterminate",
+    "prototype/src/main.rs:103 ProgressState / :129 Indicator / :166 Kind / :177 Row"
+  ]
+}

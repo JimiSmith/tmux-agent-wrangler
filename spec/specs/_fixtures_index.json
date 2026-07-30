@@ -1,0 +1,119 @@
+[
+  {
+    "module": "color",
+    "path": "/home/james/Development/tmux-agent-wrangler/prototype/spec/fixtures/color.json",
+    "count": 342,
+    "cases": [
+      "data:PALETTE_MUTED/SATURATED/BRIGHT dumped bit-for-bit with the load-bearing 8-name iteration order (red,blue,green,yellow,purple,orange,pink,cyan)",
+      "data:PALETTE_ANSI_BASE with orange->yellow(3) and pink->magenta(5) aliasing preserved; curses COLOR_* constants recorded",
+      "data:BASE_UI_PAIRS (1=green,2=cyan,3=yellow,4=red on -1) and data:INDICATOR_PAIRS (green=1,yellow=3,red=4) for the glue ordering contract",
+      "rgb_to_ansi256 canonical (202,138,4)->178 (gold, not nearest-RGB 172)",
+      "rgb_to_ansi256 full gray-ramp sweep r==g==b for all 0..255, exercising the r<8->16, r>248->231 boundaries and that 8->232 / 248->255 fall in the ramp branch",
+      "rgb_to_ansi256 cube corners, all 24 palette RGB triples, and assorted per-channel-rounding mid values",
+      "theme_palette: -ansi suffix (dark/light/custom/dark-daltonized-ansi)->None takes precedence; dark-daltonized->bright, light-daltonized->saturated (crossed); dark/light/unknown/empty->muted",
+      "read_theme: missing file, empty file, malformed JSON, {}, missing theme key -> dark; null and empty-string theme -> dark; case-lowercasing (Dark-Daltonized, LIGHT-ANSI); dark/light passthrough",
+      "agent_color_index: cnum per name for dark/light/daltonized (rgb) vs dark-ansi (ANSI base on 256 term) vs colors=8 (<256 ANSI base) vs unknown->muted",
+      "agent_pair_for: present color->its id, empty-string/None/unknown->fallback 2, name skipped during init (absent from map)->fallback 2",
+      "indicator_pair_for: green/yellow/red->1/3/4; None indicator_color inherits row attr (no lookup)"
+    ],
+    "not_fixturable": [
+      "init_agent_colors: calls curses.init_pair for ids 10.., mutates the sticky module-global _agent_color_pairs, and the init_pair-failure `continue` path (skip name, do not advance pair_id) all require a live curses/terminal - integration test only. Its cnum computation is captured via the agent_color_index fixtures.",
+      "The >=256 palette gate reads curses.COLORS (terminfo max_colors); the real value comes from the terminal - integration test with a known TERM.",
+      "curses.use_default_colors()/start_color()/init_pair base-pair setup in main() (bg -1 depends on default-colors support) - terminal-dependent glue, integration only.",
+      "draw()'s actual rendering (color_pair/addnstr/A_REVERSE layering) - needs curses; only the agent_pair_for and indicator_pair_for lookup logic is fixtured."
+    ]
+  },
+  {
+    "module": "labels",
+    "path": "/home/james/Development/tmux-agent-wrangler/prototype/spec/fixtures/labels.json",
+    "count": 72,
+    "cases": [
+      "yaml_scalar: whitespace-only/empty -> \"\"",
+      "yaml_scalar: null and ~ tokens -> \"\"; nullish returned verbatim",
+      "yaml_scalar: lone \" (len<2 guard) -> \"\"; empty \"\" -> \"\"",
+      "yaml_scalar: double-quoted digits/true stay quoted JSON strings -> 123/true",
+      "yaml_scalar: escaped \\t decoded via json.loads",
+      "yaml_scalar: malformed embedded-quote falls back to value[1:-1] (not re-unescaped) -> foo\"bar",
+      "yaml_scalar: single-quoted doubled '' -> ' ; lone ' -> \"\"",
+      "yaml_scalar: plain unquoted trimmed and returned verbatim",
+      "workspace_field: first occurrence honored (not last)",
+      "workspace_field: column-0 only, indented name: ignored",
+      "workspace_field: name:foo no-space-after-colon matches; names: x does NOT match name:",
+      "workspace_field: block scalar (|,|-,>) returns first non-empty continuation line only, no fold/join",
+      "workspace_field: block all-blank -> \"\"; empty continuation skipped not terminating; non-ws line terminates",
+      "workspace_field: quoted/single-quoted block-less values delegate to yaml_scalar; no match -> \"\"",
+      "label_mode_from: exact trimmed+lowered 'dir' -> dir; DIR/Dir/' dir ' -> dir; directory/empty/whitespace/junk -> name",
+      "agent_label: teammate '@name - tail' with title(name-mode)/dir(dir-mode); untitled teammate -> @name (no trailing sep)",
+      "agent_label: top-level name-mode title-or-dir; dir-mode always dir; ASCII ' - ' separator; all-empty -> \"\"",
+      "scan_tail: ai/custom/color LAST-wins; agent/team FIRST-wins asymmetry",
+      "scan_tail: empty customTitle/aiTitle/agentColor falsy -> field unset",
+      "scan_tail: type=='agent-name' excluded from agentName/teamName read",
+      "scan_tail: elif byte-substring prefilter exclusivity (custom-title branch wins, agentName on same line ignored)",
+      "scan_tail: invalid JSON line skipped; invalid-UTF8 line skipped (binary fixture)",
+      "scan_tail: agentName None -> \"\" via `or`, first-wins resolves on next record",
+      "scan_tail: size>65536 drops truncated first line (large-file fixture); small file keeps first line",
+      "scan_tail: missing/unreadable file -> (\"\",\"\",\"\",\"\",\"\")",
+      "scan_tail: all five fields captured from one tail"
+    ],
+    "not_fixturable": [
+      "_copilot_title: reads ~/.copilot/session-state/<id>/workspace.yaml (home-dir expansion + fs), keyed on st_mtime_ns cache with sticky-keep-previous-on-empty and no-cache-write on read failure \u2014 needs integration test with real files + mtime bumps",
+      "_claude_session_meta: getmtime (float-seconds) keyed cache, sticky is_custom/agent/team/color across ticks, manual-rename override of ai-title \u2014 stateful across calls, integration only",
+      "_copilot_session_meta: delegates to _copilot_title (fs + cache) so same as above; only its always-empty agent/team/color is trivially checkable",
+      "session_meta: claude/copilot dispatch is stateful via the handlers' caches; only the unknown/empty-agent catch-all (-> all-empty) is pure \u2014 verify dispatch + stickiness in integration",
+      "MTIME-KEY cadence parity (claude float getmtime vs copilot st_mtime_ns) and sub-granularity-rewrite skip-rescan behavior \u2014 timing-dependent, integration/property test",
+      "Module-global cache stickiness during output bursts (title/is_custom/agent/team/color pushed out of 64KiB tail then kept) \u2014 requires multi-tick sequence, not single input/output"
+    ]
+  },
+  {
+    "module": "assoc",
+    "path": "/home/james/Development/tmux-agent-wrangler/prototype/spec/fixtures/assoc.json",
+    "count": 63,
+    "cases": [
+      "strip_status_prefix: glyph+space stripped (star, braille spinner); glyph-only no-space kept; glyph+TAB (no ASCII space) kept whole; empty/whitespace-only -> ''; alnum head ('Real...', 'x2 something') keeps whole title; padded glyph trims to remainder; real title with surrounding whitespace trimmed",
+      "process_under: ancestor==0 short-circuit false; pid==ancestor==1 true (equality tested before pid<=1 guard); pid==ancestor==5 true on empty map; multi-hop walk to ancestor and to intermediate ancestor; chain reaching pid<=1 -> false; missing key -> get(0) -> false; 2-node cycle bounded to false; direct parent true",
+      "parse_registry_record: legacy 2-field (agent='claude', pid='', transcript=''); current 4-field (transcript=''); current 5-field; pane-less empty-leading field preserved (rstrip '\\n' only); trailing empty transcript field preserved; 3-field -> null; 1-field -> null; copilot-<id> session_id strip; name without agent prefix keeps whole name; trailing newline stripped; 6th field ignored; legacy pane-less",
+      "attention_token: digit token '42\\n' -> 42; whitespace-wrapped digit token stripped -> int; missing file -> null",
+      "label_mode_from: 'dir'/'DIR'/' Dir ' -> 'dir'; 'name'/''/'xyz'/'  '/'directory' -> 'name'",
+      "agent_label: teammate name-mode with/without title ('@alice - tail' vs '@alice'); teammate dir-mode with/empty dir; top-level name-mode titled/untitled(->dir); top-level dir-mode; empty dir+dir-mode -> ''; untitled+no-dir -> ''",
+      "scan_tail: ai-title only; custom overrides ai; agent-color; teammate agentName/teamName from non agent-name record; agentName inside agent-name record ignored; malformed JSON line skipped (keeps prior good); last ai-title wins; all five fields together (custom,ai,agent,team,color); empty aiTitle not taken; no relevant records -> all ''"
+    ],
+    "not_fixturable": [
+      "ppid_map \u2014 shells out to `ps -e -o pid= -o ppid=`; test with a fake PATH `ps` stub or assert parse of a captured stdout sample in an integration test",
+      "pid_alive \u2014 sends os.kill(pid,0); needs a live/dead pid and an EPERM case, integration-only",
+      "fetch_agent_sessions \u2014 the whole two-pass association: runs `tmux list-panes -a`, ppid_map (ps), reads REGISTRY dir + markers, and performs destructive prune unlinks; order-sensitive (sorted listdir drives candidate/row order + tiebreak). Cover pass1 prune predicates, pane_owner title tiebreak (recorded_pane THEN cwd via `or` short-circuit), pass2 process_under placement, status attention>working, display_cwd/dir_name fallbacks, and N-placement fan-out in an integration harness with a temp REGISTRY + mocked tmux/ps",
+      "fetch_windows \u2014 parses `tmux list-panes/-windows` output; tmux-dependent",
+      "_attention_token mtime-ns fallback \u2014 empty or non-numeric marker returns st_mtime_ns, which is wall-clock and non-reproducible; verify the fallback path (and its i128 domain vs the notify module) in an integration test that stats a file it just wrote, not a golden value",
+      "session_meta / _claude_session_meta / _copilot_title \u2014 mtime-keyed caches (_title_cache, _copilot_title_cache) with sticky-value carry-over across scans, and _copilot_title reads ~/.copilot/session-state/<id>/workspace.yaml live; cache/stickiness behavior needs a stateful test (raw _scan_tail is fixtured here)",
+      "team_pane_colors \u2014 reads teammate team config files from disk (color module dependency); not exercised by these pure fixtures"
+    ]
+  },
+  {
+    "module": "rows",
+    "path": "/home/james/Development/tmux-agent-wrangler/prototype/spec/fixtures/rows.json",
+    "count": 126,
+    "cases": [
+      "rgb_to_ansi256 (14): gray ramp <8/>248/mid, 6x6x6 cube, r==g==b boundaries, Claude's 202,138,4->178 gold trap",
+      "spinner_frame (10): frame 0, wrap at len=10 (frame 10->0, 11->1), large frame 1000000 modulo",
+      "progress_indicator (24): full pipeline (indicator_for+resolve baked for a frame). pct=0->'0%' green (not dropped); normal/paused/error pct=None->spinner COLORED by state (subtlest trap); indeterminate->spinner row-color None even with a pct; unknown active state 'loading'->pct/spinner in row color (None); INACTIVE {'','hidden'} fall through to hook; OSC wins over hook attention; osc_on w/ hook_on false; both off->('',None)",
+      "fit (16): field==0->''; overflow field==1->lone ellipsis; overflow field>1->first field-1 chars+ellipsis; exact fit unchanged; short->ljust pad; CJK counted by code points not display width (\u65e5\u672c\u8a9e\u30c6\u30b9\u30c8/4 -> \u65e5\u672c\u8a9e\u2026)",
+      "strip_status_prefix (15): drop non-alphanumeric glyph head (\u2733/braille/\u25cf), keep alphanumeric head (word/123/@name), lone glyph, empty/whitespace, leading-space trim, ':)' and '-' non-alnum heads",
+      "process_under (10): self-match, direct child, deep chain, reaches init w/o match, ancestor==0->False, missing pid in map, pid<=1 guard, pid==ancestor==1",
+      "label_mode_from (9): 'dir'/'DIR'/' Dir ' (case+strip)->dir, 'name'/''/unknown/'dirx'->name",
+      "agent_label (10): teammate '@name - tail' (name-mode uses title, dir-mode uses dir), untitled teammate->'@name', top-level title-or-dir fallback per mode, empty everything->''",
+      "scan_tail (10): empty, ai-only, custom over ai (sticky manual), last-ai-wins, agent-color, teammate agentName+teamName, 'agent-name'-typed record ignored for identity, malformed JSON skipped, empty customTitle ignored, mixed all five fields",
+      "build_rows (8): basic no-sessions tree; window with zero panes (heading only); single agent section; two agents sorted (claude<copilot) w/ working+attention emphatic; one session under two windows (distinct pane keys); OSC+hook pane indicators (0% green / indeterminate spinner / hidden inactive); empty windows w/ sessions (headers+blanks, no groups); agent-row OSC percentage"
+    ],
+    "not_fixturable": [
+      "fetch_windows - shells out to tmux list-windows/list-panes (source of window/pane/pb_state/pb_progress dicts); verify via integration",
+      "ppid_map - runs `ps -e -o pid= -o ppid=`; process_under's map input is fixtured but the map builder is not",
+      "tmux() and option getters (min_width, sync_width_enabled, label_mode, hook_progress_enabled, osc_progress_enabled, bell_enabled, osc_notify_mode) - all shell out to tmux show-option",
+      "fetch_agent_sessions / place() - reads live registry files, tmux, process ancestry, title matching; the session dicts it emits are hand-built here instead",
+      "session_meta / _claude_session_meta / _copilot_session_meta - mtime-keyed caches + workspace.yaml/transcript file reads; only the pure core _scan_tail is fixtured (label composition split into agent_label, also fixtured)",
+      "_copilot_title / _workspace_field / _yaml_scalar - read ~/.copilot workspace.yaml from disk with mtime cache (candidates for a separate labels-module fixture set, not rows)",
+      "read_theme / _theme_palette / init_agent_colors - read ~/.claude/settings.json and touch curses; _rgb_to_ansi256 (the pure math) is fixtured",
+      "team_pane_colors - reads TEAMS_DIR/<team>/config.json with mtime cache",
+      "draw() - curses rendering; consumes fit() + baked indicator/indicator_color which ARE fixtured via build_rows",
+      "focus/activate/window_real_panes/notify_attention/pid_alive - tmux calls, tty writes, os.kill live-process probes"
+    ]
+  }
+]

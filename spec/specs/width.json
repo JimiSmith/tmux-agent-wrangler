@@ -1,0 +1,119 @@
+{
+  "module": "width",
+  "pure": false,
+  "target_path": "src/daemon/width.rs",
+  "source_refs": [
+    "scripts/sidebar.py:29 (SIDEBAR_PANE = os.environ['TMUX_PANE'])",
+    "scripts/sidebar.py:30-42 (STATE_DIR, WIDTH_FILE)",
+    "scripts/sidebar.py:137-144 (min_width, sync_width_enabled)",
+    "scripts/sidebar.py:223-238 (read_width, write_width)",
+    "scripts/sidebar.py:255-299 (fetch_windows -> me['panes']; sidebar panes excluded from a window's pane list)",
+    "scripts/sidebar.py:955-972 (main() init of floor/sync/last_width/pending_width/last_pane_set/relayout_grace)",
+    "scripts/sidebar.py:1010-1013 (poll gating force_poll / POLL_INTERVAL)",
+    "scripts/sidebar.py:1032-1039 (pane-set change -> relayout_grace=2)",
+    "scripts/sidebar.py:1041-1072 (width reconcile block + grace decrement)"
+  ],
+  "depends_on": [
+    "tmux",
+    "rows",
+    "glue",
+    "daemon"
+  ],
+  "functions": [
+    {
+      "name": "min_width",
+      "signature": "fn min_width(tmux: &Tmux) -> u16",
+      "behavior": "Runs `tmux show-option -gqv @wrangler-min-width`, trims surrounding whitespace, returns the parsed integer when the trimmed string is entirely ASCII digits, else the default 24. This is the floor the sidebar width is clamped to; it is also the lower bound used when snapping back after a relayout.",
+      "side_effects": "Reads a global tmux option via subprocess. No state writes.",
+      "edge_cases": [
+        "Unset option -> tmux returns empty string -> not all-digits -> 24.",
+        "Non-numeric like '24px' or 'abc' -> Python str.isdigit() False -> 24. Rust must reject any non-digit char, NOT parse a numeric prefix.",
+        "Negative '-5' -> isdigit() False ('-' is non-digit) -> 24. A naive i32 parse would accept -5; must reject to keep parity.",
+        "Value '0' -> isdigit() True -> floor 0 (legal, degenerate). Do NOT coerce 0 up to 24; the downstream `not restore` zero-guard depends on 0 being a real floor.",
+        "Whitespace is stripped before the digit test; interior whitespace makes it non-digit -> 24.",
+        "Python str.isdigit() also accepts some non-ASCII/unicode digits; parity risk is negligible for tmux option values but Rust should restrict to ASCII 0-9 which is the practical intent."
+      ]
+    },
+    {
+      "name": "sync_width_enabled",
+      "signature": "fn sync_width_enabled(tmux: &Tmux) -> bool",
+      "behavior": "Runs `tmux show-option -gqv @wrangler-sync-width`, trims and lowercases, returns false only when the value is exactly one of {\"off\",\"0\",\"no\",\"false\"}; every other value (including empty/unset) returns true. Controls whether this sidebar publishes its width to and adopts widths from the shared width file.",
+      "side_effects": "Reads a global tmux option via subprocess.",
+      "edge_cases": [
+        "Unset/empty -> not in the off-set -> true (sync is default ON).",
+        "Case-insensitive: 'OFF','Off','FALSE' all map to false via lowercasing.",
+        "Any unrecognised value (e.g. 'yes','maybe','1 ') -> true. Note '1' -> true (it is NOT in the off-set), which is asymmetric with other boolean options in the codebase; do not 'normalise' this.",
+        "Whitespace-only value trims to '' -> true."
+      ]
+    },
+    {
+      "name": "read_width",
+      "signature": "fn read_width() -> Option<u16>",
+      "behavior": "Opens the shared WIDTH_FILE (STATE_DIR/width), reads and trims its contents, returns Some(parsed) when the trimmed text is all ASCII digits, else None. The shared/published sidebar width that all per-window sidebars converge on.",
+      "side_effects": "Reads a file. No writes.",
+      "edge_cases": [
+        "Missing/unreadable file (any OSError) -> None.",
+        "Empty file or whitespace-only -> trimmed '' not all-digits -> None.",
+        "Non-digit contents -> None (mirror isdigit reject; no numeric-prefix parsing).",
+        "Contents '0' -> Some(0). Callers treat Some(0) distinctly: in the relayout branch `not restore` makes 0 fall back to max(last_width,floor); in the adopt-shared branch `shared_width` truthiness makes 0 be ignored. Rust must preserve that 0 is parsed (Some(0)) not None, so those two guards behave identically.",
+        "Trailing newline tolerated by trim (write_width writes no newline but read is newline-tolerant for hand-edits)."
+      ]
+    },
+    {
+      "name": "write_width",
+      "signature": "fn write_width(width: u16)",
+      "behavior": "Ensures STATE_DIR exists (mkdir -p) then writes the integer as its decimal ASCII string with NO trailing newline, truncating the file. Publishes this sidebar's width for the other per-window sidebars to adopt.",
+      "side_effects": "Creates STATE_DIR if absent; writes/overwrites WIDTH_FILE. All IO errors are swallowed (best-effort, never panics/propagates).",
+      "edge_cases": [
+        "Directory creation uses exist_ok semantics; a pre-existing dir is fine.",
+        "Any IO failure (permissions, race) is silently ignored \u2014 must not error or crash the poll loop.",
+        "No newline written; keep it byte-for-byte 'str(width)' so concurrent readers never see a partial-with-newline vs without mismatch (harmless but preserve)."
+      ]
+    },
+    {
+      "name": "WidthSync::new",
+      "signature": "fn new(tmux: &Tmux, initial_width: u16) -> WidthSync",
+      "behavior": "Constructs the per-sidebar width-sync state captured ONCE at startup: floor = min_width(tmux), sync = sync_width_enabled(tmux), last_width = initial_width (the sidebar pane's column count at startup), pending_width = None, last_pane_set = None, relayout_grace = 0. floor and sync are read a single time here and never re-read, so runtime changes to @wrangler-min-width / @wrangler-sync-width take effect only after the sidebar process restarts.",
+      "side_effects": "Two tmux option reads at construction.",
+      "edge_cases": [
+        "floor and sync are STICKY for the process lifetime \u2014 this is intentional and must be preserved (do not re-read per poll).",
+        "initial_width comes from the TUI backend's screen width (Python stdscr.getmaxyx()[1]); it seeds last_width so the first poll only acts if width actually changed since startup.",
+        "last_pane_set starts None so the FIRST poll never triggers relayout_grace (the pane set is only 'changed' relative to a previously-seen set)."
+      ]
+    },
+    {
+      "name": "WidthSync::poll",
+      "signature": "fn poll(&mut self, tmux: &Tmux, width_now: u16, my_panes: &BTreeSet<PaneId>, sidebar_pane: &str)",
+      "behavior": "The full per-poll width reconciliation, run once each data poll (POLL_INTERVAL cadence or right after input), in this exact order: (1) Relayout detection: if last_pane_set is Some and differs from my_panes, set relayout_grace = 2; then store last_pane_set = my_panes. (2) Width reconcile: if width_now != last_width { let requested = pending_width.take(); if width_now != requested { if relayout_grace > 0 { a tmux relayout is redistributing space \u2014 snap back: restore = read_width() if sync else None; if restore is None/0/below floor, restore = max(last_width, floor); if restore != width_now, issue resize-pane -t <sidebar_pane> -x restore and set pending_width = Some(restore) } else { a genuine user resize \u2014 target = max(width_now, floor); if target != width_now, resize to target and set pending_width = Some(target); additionally if sync and read_width() != Some(target), write_width(target) } } } else if sync && pending_width.is_none() { adopt shared: shared = read_width(); if shared is Some(v) with v != 0 && v >= floor && v != width_now, resize-pane -x v and set pending_width = Some(v) }. (3) last_width = width_now. (4) relayout_grace = relayout_grace.saturating_sub(1). pending_width records our OWN resize requests so that when they land (next width change) they are consumed as `requested` and not misread as a user resize to be re-published.",
+      "side_effects": "May run `tmux resize-pane -t <sidebar_pane> -x <n>` (0 or 1 per poll). May call write_width (publish). Reads read_width. Mutates all internal fields (last_width, pending_width, last_pane_set, relayout_grace).",
+      "edge_cases": [
+        "my_panes must be the set of REAL panes in this sidebar's window \u2014 sidebar panes are EXCLUDED (fetch_windows `continue`s on @wrangler_sidebar==1 or self before appending). Adding/removing a sidebar pane must NOT trigger relayout_grace; only real-pane set changes do.",
+        "relayout_grace is set to 2 and decremented AFTER the reconcile, so the tick that detects the pane-set change sees grace truthy (2), and the following tick still sees grace (1): it covers TWO ticks because the resize event and the pane-list fetch are not ordered. Preserve the set-before-reconcile, decrement-after ordering exactly.",
+        "`requested = pending_width; pending_width = None` (take) happens on EVERY width change regardless of match \u2014 a stale pending request is always consumed by the next width change even if the landed width differs from requested.",
+        "If our own resize lands at a DIFFERENT width than requested (tmux clamped for lack of room): width_now != requested -> it is then handled as user-resize (or relayout snap-back if grace active). Intentional.",
+        "If our resize is a no-op (tmux refuses to change width), width_now stays == last_width, pending_width stays Some, which blocks the adopt-shared elif until some width change clears it. Transient; must replicate (do not eagerly clear pending on no-op).",
+        "The two arms are mutually exclusive: adopt-shared runs ONLY when width unchanged AND sync AND pending_width is None \u2014 never resize-to-clamp and adopt-shared in the same poll.",
+        "User-resize arm publishes even when it does NOT resize: if width_now >= floor, target==width_now so no resize is issued, but write_width(target) still runs (when sync and published differs). A user widening the pane publishes the new width without a self-resize.",
+        "User shrinking below floor: target=floor > width_now -> resize UP to floor and pending_width=Some(floor); publish floor.",
+        "Relayout snap-back works even with sync OFF: restore falls to max(last_width, floor); the floor is still enforced during relayout without any shared file.",
+        "Zero handling: with floor==0 and width file '0', relayout `not restore` treats Some(0) as needing fallback (restore becomes max(last_width,0)); adopt-shared treats Some(0) as falsy and ignores it. Both must special-case 0 separately from the `< floor` comparison.",
+        "resize-pane target is the sidebar's own pane id (TMUX_PANE), always -x (width) only.",
+        "relayout_grace truthiness is `> 0`; saturating decrement never goes negative."
+      ]
+    }
+  ],
+  "parity_risks": [
+    "min_width / read_width use Python str.isdigit() semantics: reject the ENTIRE string on any non-digit (no numeric-prefix parsing) and reject negatives and '+'. A Rust str::parse::<u16>() differs (accepts leading '+'? no, but accepts values that isdigit would too); the real trap is not accepting '-5'/'24px'. Match isdigit exactly (all chars ASCII 0-9, non-empty).",
+    "The `not restore or restore < floor` guard in the relayout branch treats Some(0) as falsy: a published width of 0 must fall through to max(last_width,floor), NOT be used as the restore target. Distinct from the `restore < floor` check when floor is 0.",
+    "The adopt-shared `shared_width and shared_width >= floor` treats Some(0) as falsy (ignored). So 0 behaves differently in the two branches; do not unify the guards.",
+    "floor and sync are cached ONCE at construction and never re-read \u2014 sticky config; runtime option changes require a sidebar restart. Do not helpfully re-read per poll.",
+    "pending_width is sticky cached self-request state: it is consumed by the NEXT width change (via take) whether or not the landed width matches, and it gates the adopt-shared branch. Mis-clearing it (e.g. clearing eagerly, or not clearing on a mismatched landing) changes republish/adopt behaviour.",
+    "Ordering invariant: relayout_grace=2 is set BEFORE the width reconcile within the same poll, and decremented AFTER \u2014 giving a 2-tick window. Reordering breaks the 'two ticks around a pane-set change' guarantee.",
+    "my_panes must exclude sidebar panes (they are filtered out in fetch_windows before a window's pane list is built). Feeding it the full pane list would make sidebar spawn/kill spuriously trigger relayout snap-back.",
+    "last_pane_set None on first poll suppresses relayout on startup; seeding it non-None would wrongly fire grace on tick one.",
+    "width_now is the sidebar pane's live column width (from the TUI backend / a tmux pane-width query), not a cached value; it must be re-sampled each poll from the same source used to seed last_width, or spurious diffs will fire.",
+    "write_width writes no trailing newline and swallows all IO errors \u2014 keep both (best-effort, non-fatal) so a read/write race never crashes the poll loop.",
+    "The two branches are mutually exclusive per poll (if width changed / elif adopt-shared); implementing them as two independent ifs would let a single poll both clamp and adopt.",
+    "Publish-without-resize: the user-resize arm writes the width even when it issues no resize (width_now >= floor). Skipping the publish because 'nothing was resized' breaks cross-sidebar sync of a user widen."
+  ]
+}

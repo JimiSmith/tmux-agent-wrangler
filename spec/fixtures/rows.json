@@ -1,0 +1,2383 @@
+[
+  {
+    "group": "rgb_to_ansi256",
+    "name": "0,0,0",
+    "input": {
+      "r": 0,
+      "g": 0,
+      "b": 0
+    },
+    "expected": 16
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "255,255,255",
+    "input": {
+      "r": 255,
+      "g": 255,
+      "b": 255
+    },
+    "expected": 231
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "4,4,4",
+    "input": {
+      "r": 4,
+      "g": 4,
+      "b": 4
+    },
+    "expected": 16
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "250,250,250",
+    "input": {
+      "r": 250,
+      "g": 250,
+      "b": 250
+    },
+    "expected": 231
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "8,8,8",
+    "input": {
+      "r": 8,
+      "g": 8,
+      "b": 8
+    },
+    "expected": 232
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "128,128,128",
+    "input": {
+      "r": 128,
+      "g": 128,
+      "b": 128
+    },
+    "expected": 244
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "127,127,127",
+    "input": {
+      "r": 127,
+      "g": 127,
+      "b": 127
+    },
+    "expected": 244
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "202,138,4",
+    "input": {
+      "r": 202,
+      "g": 138,
+      "b": 4
+    },
+    "expected": 178
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "255,0,0",
+    "input": {
+      "r": 255,
+      "g": 0,
+      "b": 0
+    },
+    "expected": 196
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "0,255,0",
+    "input": {
+      "r": 0,
+      "g": 255,
+      "b": 0
+    },
+    "expected": 46
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "0,0,255",
+    "input": {
+      "r": 0,
+      "g": 0,
+      "b": 255
+    },
+    "expected": 21
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "100,149,237",
+    "input": {
+      "r": 100,
+      "g": 149,
+      "b": 237
+    },
+    "expected": 111
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "17,17,17",
+    "input": {
+      "r": 17,
+      "g": 17,
+      "b": 17
+    },
+    "expected": 233
+  },
+  {
+    "group": "rgb_to_ansi256",
+    "name": "247,247,247",
+    "input": {
+      "r": 247,
+      "g": 247,
+      "b": 247
+    },
+    "expected": 255
+  },
+  {
+    "group": "spinner_frame",
+    "name": "0",
+    "input": {
+      "frame": 0
+    },
+    "expected": "⠋"
+  },
+  {
+    "group": "spinner_frame",
+    "name": "1",
+    "input": {
+      "frame": 1
+    },
+    "expected": "⠙"
+  },
+  {
+    "group": "spinner_frame",
+    "name": "5",
+    "input": {
+      "frame": 5
+    },
+    "expected": "⠴"
+  },
+  {
+    "group": "spinner_frame",
+    "name": "9",
+    "input": {
+      "frame": 9
+    },
+    "expected": "⠏"
+  },
+  {
+    "group": "spinner_frame",
+    "name": "10",
+    "input": {
+      "frame": 10
+    },
+    "expected": "⠋"
+  },
+  {
+    "group": "spinner_frame",
+    "name": "11",
+    "input": {
+      "frame": 11
+    },
+    "expected": "⠙"
+  },
+  {
+    "group": "spinner_frame",
+    "name": "19",
+    "input": {
+      "frame": 19
+    },
+    "expected": "⠏"
+  },
+  {
+    "group": "spinner_frame",
+    "name": "20",
+    "input": {
+      "frame": 20
+    },
+    "expected": "⠋"
+  },
+  {
+    "group": "spinner_frame",
+    "name": "123",
+    "input": {
+      "frame": 123
+    },
+    "expected": "⠸"
+  },
+  {
+    "group": "spinner_frame",
+    "name": "1000000",
+    "input": {
+      "frame": 1000000
+    },
+    "expected": "⠋"
+  },
+  {
+    "group": "progress_indicator",
+    "name": "working||None|True|False|0",
+    "input": {
+      "hook_status": "working",
+      "pb_state": "",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": {
+      "text": "⠋",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "working||None|True|False|3",
+    "input": {
+      "hook_status": "working",
+      "pb_state": "",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 3
+    },
+    "expected": {
+      "text": "⠸",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "attention||None|True|False|0",
+    "input": {
+      "hook_status": "attention",
+      "pb_state": "",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": {
+      "text": "●",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "working||None|False|False|0",
+    "input": {
+      "hook_status": "working",
+      "pb_state": "",
+      "pb_progress": null,
+      "hook_on": false,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": {
+      "text": "",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "attention||None|False|False|0",
+    "input": {
+      "hook_status": "attention",
+      "pb_state": "",
+      "pb_progress": null,
+      "hook_on": false,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": {
+      "text": "",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "||None|True|False|0",
+    "input": {
+      "hook_status": "",
+      "pb_state": "",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": {
+      "text": "",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "done||None|True|False|0",
+    "input": {
+      "hook_status": "done",
+      "pb_state": "",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": {
+      "text": "",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "working|hidden|50|True|True|2",
+    "input": {
+      "hook_status": "working",
+      "pb_state": "hidden",
+      "pb_progress": 50,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 2
+    },
+    "expected": {
+      "text": "⠹",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "attention||None|True|True|0",
+    "input": {
+      "hook_status": "attention",
+      "pb_state": "",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 0
+    },
+    "expected": {
+      "text": "●",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|normal|0|True|True|0",
+    "input": {
+      "hook_status": "",
+      "pb_state": "normal",
+      "pb_progress": 0,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 0
+    },
+    "expected": {
+      "text": "0%",
+      "color": "green"
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "working|normal|0|True|True|0",
+    "input": {
+      "hook_status": "working",
+      "pb_state": "normal",
+      "pb_progress": 0,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 0
+    },
+    "expected": {
+      "text": "0%",
+      "color": "green"
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|normal|100|True|True|0",
+    "input": {
+      "hook_status": "",
+      "pb_state": "normal",
+      "pb_progress": 100,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 0
+    },
+    "expected": {
+      "text": "100%",
+      "color": "green"
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|normal|None|True|True|4",
+    "input": {
+      "hook_status": "",
+      "pb_state": "normal",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 4
+    },
+    "expected": {
+      "text": "⠼",
+      "color": "green"
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|paused|42|True|True|0",
+    "input": {
+      "hook_status": "",
+      "pb_state": "paused",
+      "pb_progress": 42,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 0
+    },
+    "expected": {
+      "text": "42%",
+      "color": "yellow"
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|error|99|True|True|0",
+    "input": {
+      "hook_status": "",
+      "pb_state": "error",
+      "pb_progress": 99,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 0
+    },
+    "expected": {
+      "text": "99%",
+      "color": "red"
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|paused|None|True|True|1",
+    "input": {
+      "hook_status": "",
+      "pb_state": "paused",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 1
+    },
+    "expected": {
+      "text": "⠙",
+      "color": "yellow"
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|error|None|True|True|1",
+    "input": {
+      "hook_status": "",
+      "pb_state": "error",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 1
+    },
+    "expected": {
+      "text": "⠙",
+      "color": "red"
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|indeterminate|None|True|True|5",
+    "input": {
+      "hook_status": "",
+      "pb_state": "indeterminate",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 5
+    },
+    "expected": {
+      "text": "⠴",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|indeterminate|30|True|True|5",
+    "input": {
+      "hook_status": "",
+      "pb_state": "indeterminate",
+      "pb_progress": 30,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 5
+    },
+    "expected": {
+      "text": "⠴",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|loading|55|True|True|0",
+    "input": {
+      "hook_status": "",
+      "pb_state": "loading",
+      "pb_progress": 55,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 0
+    },
+    "expected": {
+      "text": "55%",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|loading|None|True|True|2",
+    "input": {
+      "hook_status": "",
+      "pb_state": "loading",
+      "pb_progress": null,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 2
+    },
+    "expected": {
+      "text": "⠹",
+      "color": null
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "attention|normal|10|True|True|0",
+    "input": {
+      "hook_status": "attention",
+      "pb_state": "normal",
+      "pb_progress": 10,
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 0
+    },
+    "expected": {
+      "text": "10%",
+      "color": "green"
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "|normal|20|False|True|0",
+    "input": {
+      "hook_status": "",
+      "pb_state": "normal",
+      "pb_progress": 20,
+      "hook_on": false,
+      "osc_on": true,
+      "frame": 0
+    },
+    "expected": {
+      "text": "20%",
+      "color": "green"
+    }
+  },
+  {
+    "group": "progress_indicator",
+    "name": "working|normal|20|False|False|0",
+    "input": {
+      "hook_status": "working",
+      "pb_state": "normal",
+      "pb_progress": 20,
+      "hook_on": false,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": {
+      "text": "",
+      "color": null
+    }
+  },
+  {
+    "group": "fit",
+    "name": "'hello'|0",
+    "input": {
+      "text": "hello",
+      "field": 0
+    },
+    "expected": ""
+  },
+  {
+    "group": "fit",
+    "name": "'hello'|1",
+    "input": {
+      "text": "hello",
+      "field": 1
+    },
+    "expected": "…"
+  },
+  {
+    "group": "fit",
+    "name": "'hello'|4",
+    "input": {
+      "text": "hello",
+      "field": 4
+    },
+    "expected": "hel…"
+  },
+  {
+    "group": "fit",
+    "name": "'hello'|5",
+    "input": {
+      "text": "hello",
+      "field": 5
+    },
+    "expected": "hello"
+  },
+  {
+    "group": "fit",
+    "name": "'hello'|6",
+    "input": {
+      "text": "hello",
+      "field": 6
+    },
+    "expected": "hello "
+  },
+  {
+    "group": "fit",
+    "name": "'hello'|10",
+    "input": {
+      "text": "hello",
+      "field": 10
+    },
+    "expected": "hello     "
+  },
+  {
+    "group": "fit",
+    "name": "''|0",
+    "input": {
+      "text": "",
+      "field": 0
+    },
+    "expected": ""
+  },
+  {
+    "group": "fit",
+    "name": "''|3",
+    "input": {
+      "text": "",
+      "field": 3
+    },
+    "expected": "   "
+  },
+  {
+    "group": "fit",
+    "name": "'a'|1",
+    "input": {
+      "text": "a",
+      "field": 1
+    },
+    "expected": "a"
+  },
+  {
+    "group": "fit",
+    "name": "'ab'|1",
+    "input": {
+      "text": "ab",
+      "field": 1
+    },
+    "expected": "…"
+  },
+  {
+    "group": "fit",
+    "name": "'abc'|2",
+    "input": {
+      "text": "abc",
+      "field": 2
+    },
+    "expected": "a…"
+  },
+  {
+    "group": "fit",
+    "name": "'wide title here'|8",
+    "input": {
+      "text": "wide title here",
+      "field": 8
+    },
+    "expected": "wide ti…"
+  },
+  {
+    "group": "fit",
+    "name": "'日本語テスト'|4",
+    "input": {
+      "text": "日本語テスト",
+      "field": 4
+    },
+    "expected": "日本語…"
+  },
+  {
+    "group": "fit",
+    "name": "'日本語テスト'|3",
+    "input": {
+      "text": "日本語テスト",
+      "field": 3
+    },
+    "expected": "日本…"
+  },
+  {
+    "group": "fit",
+    "name": "'日本語'|3",
+    "input": {
+      "text": "日本語",
+      "field": 3
+    },
+    "expected": "日本語"
+  },
+  {
+    "group": "fit",
+    "name": "'x'|5",
+    "input": {
+      "text": "x",
+      "field": 5
+    },
+    "expected": "x    "
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'✳ My session title'",
+    "input": {
+      "title": "✳ My session title"
+    },
+    "expected": "My session title"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'⠋ Working on stuff'",
+    "input": {
+      "title": "⠋ Working on stuff"
+    },
+    "expected": "Working on stuff"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'Plain title no glyph'",
+    "input": {
+      "title": "Plain title no glyph"
+    },
+    "expected": "Plain title no glyph"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'  ✳  leading spaces title  '",
+    "input": {
+      "title": "  ✳  leading spaces title  "
+    },
+    "expected": "leading spaces title"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'●'",
+    "input": {
+      "title": "●"
+    },
+    "expected": "●"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'● alone'",
+    "input": {
+      "title": "● alone"
+    },
+    "expected": "alone"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "''",
+    "input": {
+      "title": ""
+    },
+    "expected": ""
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'   '",
+    "input": {
+      "title": "   "
+    },
+    "expected": ""
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'word'",
+    "input": {
+      "title": "word"
+    },
+    "expected": "word"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'123 numeric head kept'",
+    "input": {
+      "title": "123 numeric head kept"
+    },
+    "expected": "123 numeric head kept"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'- dashonly rest'",
+    "input": {
+      "title": "- dashonly rest"
+    },
+    "expected": "dashonly rest"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "':) smiley rest'",
+    "input": {
+      "title": ":) smiley rest"
+    },
+    "expected": "smiley rest"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'@name real title'",
+    "input": {
+      "title": "@name real title"
+    },
+    "expected": "@name real title"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'✳'",
+    "input": {
+      "title": "✳"
+    },
+    "expected": "✳"
+  },
+  {
+    "group": "strip_status_prefix",
+    "name": "'✳ '",
+    "input": {
+      "title": "✳ "
+    },
+    "expected": "✳"
+  },
+  {
+    "group": "process_under",
+    "name": "100|100|{}",
+    "input": {
+      "pid": 100,
+      "ancestor": 100,
+      "parents": {}
+    },
+    "expected": true
+  },
+  {
+    "group": "process_under",
+    "name": "100|50|{'100': 50}",
+    "input": {
+      "pid": 100,
+      "ancestor": 50,
+      "parents": {
+        "100": 50
+      }
+    },
+    "expected": true
+  },
+  {
+    "group": "process_under",
+    "name": "100|10|{'100': 50, '50': 20, '20': 10}",
+    "input": {
+      "pid": 100,
+      "ancestor": 10,
+      "parents": {
+        "100": 50,
+        "50": 20,
+        "20": 10
+      }
+    },
+    "expected": true
+  },
+  {
+    "group": "process_under",
+    "name": "100|999|{'100': 50, '50': 1}",
+    "input": {
+      "pid": 100,
+      "ancestor": 999,
+      "parents": {
+        "100": 50,
+        "50": 1
+      }
+    },
+    "expected": false
+  },
+  {
+    "group": "process_under",
+    "name": "100|0|{'100': 50}",
+    "input": {
+      "pid": 100,
+      "ancestor": 0,
+      "parents": {
+        "100": 50
+      }
+    },
+    "expected": false
+  },
+  {
+    "group": "process_under",
+    "name": "100|7|{'100': 1}",
+    "input": {
+      "pid": 100,
+      "ancestor": 7,
+      "parents": {
+        "100": 1
+      }
+    },
+    "expected": false
+  },
+  {
+    "group": "process_under",
+    "name": "100|7|{}",
+    "input": {
+      "pid": 100,
+      "ancestor": 7,
+      "parents": {}
+    },
+    "expected": false
+  },
+  {
+    "group": "process_under",
+    "name": "500|20|{'500': 300, '300': 20, '20': 5}",
+    "input": {
+      "pid": 500,
+      "ancestor": 20,
+      "parents": {
+        "500": 300,
+        "300": 20,
+        "20": 5
+      }
+    },
+    "expected": true
+  },
+  {
+    "group": "process_under",
+    "name": "1|7|{}",
+    "input": {
+      "pid": 1,
+      "ancestor": 7,
+      "parents": {}
+    },
+    "expected": false
+  },
+  {
+    "group": "process_under",
+    "name": "1|1|{}",
+    "input": {
+      "pid": 1,
+      "ancestor": 1,
+      "parents": {}
+    },
+    "expected": true
+  },
+  {
+    "group": "label_mode_from",
+    "name": "'dir'",
+    "input": {
+      "value": "dir"
+    },
+    "expected": "dir"
+  },
+  {
+    "group": "label_mode_from",
+    "name": "'DIR'",
+    "input": {
+      "value": "DIR"
+    },
+    "expected": "dir"
+  },
+  {
+    "group": "label_mode_from",
+    "name": "' Dir '",
+    "input": {
+      "value": " Dir "
+    },
+    "expected": "dir"
+  },
+  {
+    "group": "label_mode_from",
+    "name": "'name'",
+    "input": {
+      "value": "name"
+    },
+    "expected": "name"
+  },
+  {
+    "group": "label_mode_from",
+    "name": "''",
+    "input": {
+      "value": ""
+    },
+    "expected": "name"
+  },
+  {
+    "group": "label_mode_from",
+    "name": "'xyz'",
+    "input": {
+      "value": "xyz"
+    },
+    "expected": "name"
+  },
+  {
+    "group": "label_mode_from",
+    "name": "'NAME'",
+    "input": {
+      "value": "NAME"
+    },
+    "expected": "name"
+  },
+  {
+    "group": "label_mode_from",
+    "name": "'dirx'",
+    "input": {
+      "value": "dirx"
+    },
+    "expected": "name"
+  },
+  {
+    "group": "label_mode_from",
+    "name": "'  dir'",
+    "input": {
+      "value": "  dir"
+    },
+    "expected": "dir"
+  },
+  {
+    "group": "agent_label",
+    "name": "name|My Title||projdir",
+    "input": {
+      "mode": "name",
+      "title": "My Title",
+      "agent_name": "",
+      "dir_name": "projdir"
+    },
+    "expected": "My Title"
+  },
+  {
+    "group": "agent_label",
+    "name": "name|||projdir",
+    "input": {
+      "mode": "name",
+      "title": "",
+      "agent_name": "",
+      "dir_name": "projdir"
+    },
+    "expected": "projdir"
+  },
+  {
+    "group": "agent_label",
+    "name": "dir|My Title||projdir",
+    "input": {
+      "mode": "dir",
+      "title": "My Title",
+      "agent_name": "",
+      "dir_name": "projdir"
+    },
+    "expected": "projdir"
+  },
+  {
+    "group": "agent_label",
+    "name": "dir|||projdir",
+    "input": {
+      "mode": "dir",
+      "title": "",
+      "agent_name": "",
+      "dir_name": "projdir"
+    },
+    "expected": "projdir"
+  },
+  {
+    "group": "agent_label",
+    "name": "name|Feature X|alice|projdir",
+    "input": {
+      "mode": "name",
+      "title": "Feature X",
+      "agent_name": "alice",
+      "dir_name": "projdir"
+    },
+    "expected": "@alice - Feature X"
+  },
+  {
+    "group": "agent_label",
+    "name": "name||alice|projdir",
+    "input": {
+      "mode": "name",
+      "title": "",
+      "agent_name": "alice",
+      "dir_name": "projdir"
+    },
+    "expected": "@alice"
+  },
+  {
+    "group": "agent_label",
+    "name": "dir|Feature X|alice|projdir",
+    "input": {
+      "mode": "dir",
+      "title": "Feature X",
+      "agent_name": "alice",
+      "dir_name": "projdir"
+    },
+    "expected": "@alice - projdir"
+  },
+  {
+    "group": "agent_label",
+    "name": "dir||alice|",
+    "input": {
+      "mode": "dir",
+      "title": "",
+      "agent_name": "alice",
+      "dir_name": ""
+    },
+    "expected": "@alice"
+  },
+  {
+    "group": "agent_label",
+    "name": "dir|Feature X|bob|",
+    "input": {
+      "mode": "dir",
+      "title": "Feature X",
+      "agent_name": "bob",
+      "dir_name": ""
+    },
+    "expected": "@bob"
+  },
+  {
+    "group": "agent_label",
+    "name": "name|||",
+    "input": {
+      "mode": "name",
+      "title": "",
+      "agent_name": "",
+      "dir_name": ""
+    },
+    "expected": ""
+  },
+  {
+    "group": "scan_tail",
+    "name": "empty",
+    "input": {
+      "content": ""
+    },
+    "expected": {
+      "custom": "",
+      "ai": "",
+      "agent": "",
+      "team": "",
+      "color": ""
+    }
+  },
+  {
+    "group": "scan_tail",
+    "name": "ai_title_only",
+    "input": {
+      "content": "{\"type\": \"ai-title\", \"aiTitle\": \"Auto Generated\"}"
+    },
+    "expected": {
+      "custom": "",
+      "ai": "Auto Generated",
+      "agent": "",
+      "team": "",
+      "color": ""
+    }
+  },
+  {
+    "group": "scan_tail",
+    "name": "custom_over_ai",
+    "input": {
+      "content": "{\"type\": \"ai-title\", \"aiTitle\": \"Auto One\"}\n{\"type\": \"custom-title\", \"customTitle\": \"Manual Name\"}\n{\"type\": \"ai-title\", \"aiTitle\": \"Auto Two\"}"
+    },
+    "expected": {
+      "custom": "Manual Name",
+      "ai": "Auto Two",
+      "agent": "",
+      "team": "",
+      "color": ""
+    }
+  },
+  {
+    "group": "scan_tail",
+    "name": "last_ai_wins",
+    "input": {
+      "content": "{\"type\": \"ai-title\", \"aiTitle\": \"First\"}\n{\"type\": \"ai-title\", \"aiTitle\": \"Second\"}"
+    },
+    "expected": {
+      "custom": "",
+      "ai": "Second",
+      "agent": "",
+      "team": "",
+      "color": ""
+    }
+  },
+  {
+    "group": "scan_tail",
+    "name": "color",
+    "input": {
+      "content": "{\"type\": \"agent-color\", \"agentColor\": \"purple\"}"
+    },
+    "expected": {
+      "custom": "",
+      "ai": "",
+      "agent": "",
+      "team": "",
+      "color": "purple"
+    }
+  },
+  {
+    "group": "scan_tail",
+    "name": "teammate_name_team",
+    "input": {
+      "content": "{\"type\": \"user\", \"agentName\": \"alice\", \"teamName\": \"team7\"}\n{\"type\": \"ai-title\", \"aiTitle\": \"Teammate Work\"}"
+    },
+    "expected": {
+      "custom": "",
+      "ai": "Teammate Work",
+      "agent": "alice",
+      "team": "team7",
+      "color": ""
+    }
+  },
+  {
+    "group": "scan_tail",
+    "name": "agentname_record_ignored",
+    "input": {
+      "content": "{\"type\": \"agent-name\", \"agentName\": \"should-ignore\", \"teamName\": \"nope\"}"
+    },
+    "expected": {
+      "custom": "",
+      "ai": "",
+      "agent": "",
+      "team": "",
+      "color": ""
+    }
+  },
+  {
+    "group": "scan_tail",
+    "name": "malformed_json_skipped",
+    "input": {
+      "content": "{not valid json\n{\"type\": \"ai-title\", \"aiTitle\": \"After Bad Line\"}"
+    },
+    "expected": {
+      "custom": "",
+      "ai": "After Bad Line",
+      "agent": "",
+      "team": "",
+      "color": ""
+    }
+  },
+  {
+    "group": "scan_tail",
+    "name": "empty_custom_title_ignored",
+    "input": {
+      "content": "{\"type\": \"custom-title\", \"customTitle\": \"\"}\n{\"type\": \"ai-title\", \"aiTitle\": \"Fallback\"}"
+    },
+    "expected": {
+      "custom": "",
+      "ai": "Fallback",
+      "agent": "",
+      "team": "",
+      "color": ""
+    }
+  },
+  {
+    "group": "scan_tail",
+    "name": "mixed_all",
+    "input": {
+      "content": "{\"type\": \"user\", \"agentName\": \"bob\", \"teamName\": \"t1\"}\n{\"type\": \"ai-title\", \"aiTitle\": \"AI Title\"}\n{\"type\": \"custom-title\", \"customTitle\": \"Custom Title\"}\n{\"type\": \"agent-color\", \"agentColor\": \"cyan\"}"
+    },
+    "expected": {
+      "custom": "Custom Title",
+      "ai": "AI Title",
+      "agent": "bob",
+      "team": "t1",
+      "color": "cyan"
+    }
+  },
+  {
+    "group": "build_rows",
+    "name": "basic_no_sessions",
+    "input": {
+      "windows": [
+        {
+          "id": "@1",
+          "index": "0",
+          "name": "editor",
+          "active": true,
+          "panes": [
+            {
+              "id": "%1",
+              "index": "0",
+              "active": true,
+              "title": "vim",
+              "pb_state": "",
+              "pb_progress": null
+            },
+            {
+              "id": "%2",
+              "index": "1",
+              "active": false,
+              "title": "shell",
+              "pb_state": "",
+              "pb_progress": null
+            }
+          ]
+        },
+        {
+          "id": "@2",
+          "index": "1",
+          "name": "logs",
+          "active": false,
+          "panes": [
+            {
+              "id": "%3",
+              "index": "0",
+              "active": true,
+              "title": "tail",
+              "pb_state": "",
+              "pb_progress": null
+            }
+          ]
+        }
+      ],
+      "sessions": [],
+      "pane_progress": {},
+      "pane_status": {},
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": [
+      {
+        "text": " WINDOWS",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: editor",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "   ├─*0: vim",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%1"
+          ],
+          "win_id": "@1",
+          "pane": "%1",
+          "indicator": "",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "   └─ 1: shell",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%2"
+          ],
+          "win_id": "@1",
+          "pane": "%2",
+          "indicator": "",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "  1: logs",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@2"
+          ],
+          "win_id": "@2"
+        }
+      },
+      {
+        "text": "   └─*0: tail",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%3"
+          ],
+          "win_id": "@2",
+          "pane": "%3",
+          "indicator": "",
+          "indicator_color": null
+        }
+      }
+    ]
+  },
+  {
+    "group": "build_rows",
+    "name": "window_zero_panes",
+    "input": {
+      "windows": [
+        {
+          "id": "@1",
+          "index": "0",
+          "name": "empty",
+          "active": true,
+          "panes": []
+        },
+        {
+          "id": "@2",
+          "index": "1",
+          "name": "other",
+          "active": false,
+          "panes": [
+            {
+              "id": "%3",
+              "index": "0",
+              "active": true,
+              "title": "sh",
+              "pb_state": "",
+              "pb_progress": null
+            }
+          ]
+        }
+      ],
+      "sessions": [],
+      "pane_progress": {},
+      "pane_status": {},
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": [
+      {
+        "text": " WINDOWS",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: empty",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "  1: other",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@2"
+          ],
+          "win_id": "@2"
+        }
+      },
+      {
+        "text": "   └─*0: sh",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%3"
+          ],
+          "win_id": "@2",
+          "pane": "%3",
+          "indicator": "",
+          "indicator_color": null
+        }
+      }
+    ]
+  },
+  {
+    "group": "build_rows",
+    "name": "single_agent_session",
+    "input": {
+      "windows": [
+        {
+          "id": "@1",
+          "index": "0",
+          "name": "work",
+          "active": true,
+          "panes": [
+            {
+              "id": "%1",
+              "index": "0",
+              "active": true,
+              "title": "claude",
+              "pb_state": "",
+              "pb_progress": null
+            }
+          ]
+        }
+      ],
+      "sessions": [
+        {
+          "id": "sess-a",
+          "agent": "claude",
+          "pane": "%1",
+          "label": "@alice - Feature",
+          "window_id": "@1",
+          "status": "working",
+          "color": "purple"
+        }
+      ],
+      "pane_progress": {},
+      "pane_status": {},
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 3
+    },
+    "expected": [
+      {
+        "text": " WINDOWS",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: work",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "   └─*0: claude",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%1"
+          ],
+          "win_id": "@1",
+          "pane": "%1",
+          "indicator": "",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": " CLAUDE",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: work",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "claude",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "   └─ @alice - Feature",
+        "item": {
+          "type": "agent",
+          "key": [
+            "a",
+            "sess-a",
+            "%1"
+          ],
+          "win_id": "@1",
+          "pane": "%1",
+          "status": "working",
+          "color": "purple",
+          "indicator": "⠸",
+          "indicator_color": null
+        }
+      }
+    ]
+  },
+  {
+    "group": "build_rows",
+    "name": "two_agents_sorted",
+    "input": {
+      "windows": [
+        {
+          "id": "@1",
+          "index": "0",
+          "name": "w1",
+          "active": true,
+          "panes": [
+            {
+              "id": "%1",
+              "index": "0",
+              "active": true,
+              "title": "a",
+              "pb_state": "",
+              "pb_progress": null
+            }
+          ]
+        },
+        {
+          "id": "@2",
+          "index": "1",
+          "name": "w2",
+          "active": false,
+          "panes": [
+            {
+              "id": "%2",
+              "index": "0",
+              "active": true,
+              "title": "b",
+              "pb_state": "",
+              "pb_progress": null
+            }
+          ]
+        }
+      ],
+      "sessions": [
+        {
+          "id": "s2",
+          "agent": "copilot",
+          "pane": "%2",
+          "label": "cop session",
+          "window_id": "@2",
+          "status": "attention",
+          "color": ""
+        },
+        {
+          "id": "s1",
+          "agent": "claude",
+          "pane": "%1",
+          "label": "claude session",
+          "window_id": "@1",
+          "status": "working",
+          "color": "green"
+        }
+      ],
+      "pane_progress": {},
+      "pane_status": {},
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": [
+      {
+        "text": " WINDOWS",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: w1",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "   └─*0: a",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%1"
+          ],
+          "win_id": "@1",
+          "pane": "%1",
+          "indicator": "",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "  1: w2",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@2"
+          ],
+          "win_id": "@2"
+        }
+      },
+      {
+        "text": "   └─*0: b",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%2"
+          ],
+          "win_id": "@2",
+          "pane": "%2",
+          "indicator": "",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": " CLAUDE",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: w1",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "claude",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "   └─ claude session",
+        "item": {
+          "type": "agent",
+          "key": [
+            "a",
+            "s1",
+            "%1"
+          ],
+          "win_id": "@1",
+          "pane": "%1",
+          "status": "working",
+          "color": "green",
+          "indicator": "⠋",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": " COPILOT",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "  1: w2",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "copilot",
+            "@2"
+          ],
+          "win_id": "@2"
+        }
+      },
+      {
+        "text": "   └─ cop session",
+        "item": {
+          "type": "agent",
+          "key": [
+            "a",
+            "s2",
+            "%2"
+          ],
+          "win_id": "@2",
+          "pane": "%2",
+          "status": "attention",
+          "color": "",
+          "indicator": "●",
+          "indicator_color": null
+        }
+      }
+    ]
+  },
+  {
+    "group": "build_rows",
+    "name": "session_two_windows",
+    "input": {
+      "windows": [
+        {
+          "id": "@1",
+          "index": "0",
+          "name": "w1",
+          "active": true,
+          "panes": [
+            {
+              "id": "%1",
+              "index": "0",
+              "active": true,
+              "title": "a",
+              "pb_state": "",
+              "pb_progress": null
+            }
+          ]
+        },
+        {
+          "id": "@2",
+          "index": "1",
+          "name": "w2",
+          "active": false,
+          "panes": [
+            {
+              "id": "%2",
+              "index": "0",
+              "active": true,
+              "title": "b",
+              "pb_state": "",
+              "pb_progress": null
+            }
+          ]
+        }
+      ],
+      "sessions": [
+        {
+          "id": "dup",
+          "agent": "claude",
+          "pane": "%1",
+          "label": "here",
+          "window_id": "@1",
+          "status": "working",
+          "color": "blue"
+        },
+        {
+          "id": "dup",
+          "agent": "claude",
+          "pane": "%2",
+          "label": "there",
+          "window_id": "@2",
+          "status": "",
+          "color": "blue"
+        }
+      ],
+      "pane_progress": {},
+      "pane_status": {},
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 2
+    },
+    "expected": [
+      {
+        "text": " WINDOWS",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: w1",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "   └─*0: a",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%1"
+          ],
+          "win_id": "@1",
+          "pane": "%1",
+          "indicator": "",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "  1: w2",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@2"
+          ],
+          "win_id": "@2"
+        }
+      },
+      {
+        "text": "   └─*0: b",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%2"
+          ],
+          "win_id": "@2",
+          "pane": "%2",
+          "indicator": "",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": " CLAUDE",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: w1",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "claude",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "   └─ here",
+        "item": {
+          "type": "agent",
+          "key": [
+            "a",
+            "dup",
+            "%1"
+          ],
+          "win_id": "@1",
+          "pane": "%1",
+          "status": "working",
+          "color": "blue",
+          "indicator": "⠹",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "  1: w2",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "claude",
+            "@2"
+          ],
+          "win_id": "@2"
+        }
+      },
+      {
+        "text": "   └─ there",
+        "item": {
+          "type": "agent",
+          "key": [
+            "a",
+            "dup",
+            "%2"
+          ],
+          "win_id": "@2",
+          "pane": "%2",
+          "status": "",
+          "color": "blue",
+          "indicator": "",
+          "indicator_color": null
+        }
+      }
+    ]
+  },
+  {
+    "group": "build_rows",
+    "name": "osc_and_hook_panes",
+    "input": {
+      "windows": [
+        {
+          "id": "@1",
+          "index": "0",
+          "name": "w1",
+          "active": true,
+          "panes": [
+            {
+              "id": "%1",
+              "index": "0",
+              "active": true,
+              "title": "p1",
+              "pb_state": "normal",
+              "pb_progress": 0
+            },
+            {
+              "id": "%2",
+              "index": "1",
+              "active": false,
+              "title": "p2",
+              "pb_state": "indeterminate",
+              "pb_progress": null
+            },
+            {
+              "id": "%3",
+              "index": "2",
+              "active": false,
+              "title": "p3",
+              "pb_state": "hidden",
+              "pb_progress": null
+            }
+          ]
+        }
+      ],
+      "sessions": [],
+      "pane_progress": {},
+      "pane_status": {
+        "%3": "attention"
+      },
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 1
+    },
+    "expected": [
+      {
+        "text": " WINDOWS",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: w1",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "   ├─*0: p1",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%1"
+          ],
+          "win_id": "@1",
+          "pane": "%1",
+          "indicator": "0%",
+          "indicator_color": "green"
+        }
+      },
+      {
+        "text": "   ├─ 1: p2",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%2"
+          ],
+          "win_id": "@1",
+          "pane": "%2",
+          "indicator": "⠙",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "   └─ 2: p3",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%3"
+          ],
+          "win_id": "@1",
+          "pane": "%3",
+          "indicator": "●",
+          "indicator_color": null
+        }
+      }
+    ]
+  },
+  {
+    "group": "build_rows",
+    "name": "empty_windows_with_sessions",
+    "input": {
+      "windows": [],
+      "sessions": [
+        {
+          "id": "s1",
+          "agent": "claude",
+          "pane": "%1",
+          "label": "orphan",
+          "window_id": "@missing",
+          "status": "working",
+          "color": ""
+        }
+      ],
+      "pane_progress": {},
+      "pane_status": {},
+      "hook_on": true,
+      "osc_on": false,
+      "frame": 0
+    },
+    "expected": [
+      {
+        "text": " WINDOWS",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": " CLAUDE",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      }
+    ]
+  },
+  {
+    "group": "build_rows",
+    "name": "agent_row_osc_progress",
+    "input": {
+      "windows": [
+        {
+          "id": "@1",
+          "index": "0",
+          "name": "w1",
+          "active": true,
+          "panes": [
+            {
+              "id": "%1",
+              "index": "0",
+              "active": true,
+              "title": "a",
+              "pb_state": "",
+              "pb_progress": null
+            }
+          ]
+        }
+      ],
+      "sessions": [
+        {
+          "id": "s1",
+          "agent": "claude",
+          "pane": "%1",
+          "label": "busy",
+          "window_id": "@1",
+          "status": "",
+          "color": "orange"
+        }
+      ],
+      "pane_progress": {
+        "%1": [
+          "normal",
+          75
+        ]
+      },
+      "pane_status": {},
+      "hook_on": true,
+      "osc_on": true,
+      "frame": 0
+    },
+    "expected": [
+      {
+        "text": " WINDOWS",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: w1",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "   └─*0: a",
+        "item": {
+          "type": "pane",
+          "key": [
+            "p",
+            "%1"
+          ],
+          "win_id": "@1",
+          "pane": "%1",
+          "indicator": "",
+          "indicator_color": null
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": " CLAUDE",
+        "item": {
+          "type": "header"
+        }
+      },
+      {
+        "text": "",
+        "item": {
+          "type": "blank"
+        }
+      },
+      {
+        "text": "* 0: w1",
+        "item": {
+          "type": "window",
+          "key": [
+            "w",
+            "claude",
+            "@1"
+          ],
+          "win_id": "@1"
+        }
+      },
+      {
+        "text": "   └─ busy",
+        "item": {
+          "type": "agent",
+          "key": [
+            "a",
+            "s1",
+            "%1"
+          ],
+          "win_id": "@1",
+          "pane": "%1",
+          "status": "",
+          "color": "orange",
+          "indicator": "75%",
+          "indicator_color": "green"
+        }
+      }
+    ]
+  }
+]

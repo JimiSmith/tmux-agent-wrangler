@@ -1,0 +1,652 @@
+[
+  {
+    "name": "strip_status_prefix/glyph_star",
+    "input": {
+      "title": "✳ My Session"
+    },
+    "expected": "My Session"
+  },
+  {
+    "name": "strip_status_prefix/glyph_only_no_space",
+    "input": {
+      "title": "✳"
+    },
+    "expected": "✳"
+  },
+  {
+    "name": "strip_status_prefix/empty",
+    "input": {
+      "title": ""
+    },
+    "expected": ""
+  },
+  {
+    "name": "strip_status_prefix/whitespace_only",
+    "input": {
+      "title": "   "
+    },
+    "expected": ""
+  },
+  {
+    "name": "strip_status_prefix/real_title_word_head",
+    "input": {
+      "title": "Real Title here"
+    },
+    "expected": "Real Title here"
+  },
+  {
+    "name": "strip_status_prefix/alnum_head_x2",
+    "input": {
+      "title": "x2 something"
+    },
+    "expected": "x2 something"
+  },
+  {
+    "name": "strip_status_prefix/braille_spinner",
+    "input": {
+      "title": "⠋ Working on thing"
+    },
+    "expected": "Working on thing"
+  },
+  {
+    "name": "strip_status_prefix/padded_glyph",
+    "input": {
+      "title": "  ✳  Padded  "
+    },
+    "expected": "Padded"
+  },
+  {
+    "name": "strip_status_prefix/glyph_tab_no_space",
+    "input": {
+      "title": "✳\tTitle"
+    },
+    "expected": "✳\tTitle"
+  },
+  {
+    "name": "strip_status_prefix/glyph_then_multiword",
+    "input": {
+      "title": "✳ two words here"
+    },
+    "expected": "two words here"
+  },
+  {
+    "name": "strip_status_prefix/leading_trailing_ws_kept_title",
+    "input": {
+      "title": "  Hello world  "
+    },
+    "expected": "Hello world"
+  },
+  {
+    "name": "process_under/ancestor_zero_shortcircuit",
+    "input": {
+      "pid": 10,
+      "ancestor": 0,
+      "parents": {
+        "10": 5,
+        "5": 1
+      }
+    },
+    "expected": false
+  },
+  {
+    "name": "process_under/pid_eq_ancestor_one",
+    "input": {
+      "pid": 1,
+      "ancestor": 1,
+      "parents": {}
+    },
+    "expected": true
+  },
+  {
+    "name": "process_under/pid_eq_ancestor_five",
+    "input": {
+      "pid": 5,
+      "ancestor": 5,
+      "parents": {}
+    },
+    "expected": true
+  },
+  {
+    "name": "process_under/walks_to_ancestor",
+    "input": {
+      "pid": 10,
+      "ancestor": 1,
+      "parents": {
+        "10": 5,
+        "5": 2,
+        "2": 1
+      }
+    },
+    "expected": true
+  },
+  {
+    "name": "process_under/walks_intermediate_ancestor",
+    "input": {
+      "pid": 10,
+      "ancestor": 2,
+      "parents": {
+        "10": 5,
+        "5": 2,
+        "2": 1
+      }
+    },
+    "expected": true
+  },
+  {
+    "name": "process_under/reaches_one_not_found",
+    "input": {
+      "pid": 10,
+      "ancestor": 99,
+      "parents": {
+        "10": 5,
+        "5": 2,
+        "2": 1
+      }
+    },
+    "expected": false
+  },
+  {
+    "name": "process_under/missing_key_defaults_zero",
+    "input": {
+      "pid": 10,
+      "ancestor": 99,
+      "parents": {}
+    },
+    "expected": false
+  },
+  {
+    "name": "process_under/cycle_bounded_false",
+    "input": {
+      "pid": 10,
+      "ancestor": 99,
+      "parents": {
+        "10": 20,
+        "20": 10
+      }
+    },
+    "expected": false
+  },
+  {
+    "name": "process_under/immediate_equal_empty_map",
+    "input": {
+      "pid": 2,
+      "ancestor": 2,
+      "parents": {}
+    },
+    "expected": true
+  },
+  {
+    "name": "process_under/direct_parent",
+    "input": {
+      "pid": 100,
+      "ancestor": 50,
+      "parents": {
+        "100": 50
+      }
+    },
+    "expected": true
+  },
+  {
+    "name": "attention_token/digit_token",
+    "input": {
+      "contents": "42\n"
+    },
+    "expected": 42
+  },
+  {
+    "name": "attention_token/digit_token_whitespace",
+    "input": {
+      "contents": "  1750000000000000000  \n"
+    },
+    "expected": 1750000000000000000
+  },
+  {
+    "name": "attention_token/missing_file_none",
+    "input": {
+      "missing": true
+    },
+    "expected": null
+  },
+  {
+    "name": "parse_registry_record/legacy_2field",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\t/home/x"
+    },
+    "expected": {
+      "pane": "%3",
+      "agent": "claude",
+      "pid": "",
+      "cwd": "/home/x",
+      "transcript": "",
+      "session_id": "abc"
+    }
+  },
+  {
+    "name": "parse_registry_record/current_4field_no_transcript",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\tclaude\t1234\t/home/x"
+    },
+    "expected": {
+      "pane": "%3",
+      "agent": "claude",
+      "pid": "1234",
+      "cwd": "/home/x",
+      "transcript": "",
+      "session_id": "abc"
+    }
+  },
+  {
+    "name": "parse_registry_record/current_5field_transcript",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\tclaude\t1234\t/home/x\t/t/x.jsonl"
+    },
+    "expected": {
+      "pane": "%3",
+      "agent": "claude",
+      "pid": "1234",
+      "cwd": "/home/x",
+      "transcript": "/t/x.jsonl",
+      "session_id": "abc"
+    }
+  },
+  {
+    "name": "parse_registry_record/paneless_empty_leading",
+    "input": {
+      "name": "claude-dae",
+      "contents": "\tclaude\t1234\t/home/x\t/t/x.jsonl"
+    },
+    "expected": {
+      "pane": "",
+      "agent": "claude",
+      "pid": "1234",
+      "cwd": "/home/x",
+      "transcript": "/t/x.jsonl",
+      "session_id": "dae"
+    }
+  },
+  {
+    "name": "parse_registry_record/trailing_empty_transcript",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\tclaude\t1234\t/home/x\t"
+    },
+    "expected": {
+      "pane": "%3",
+      "agent": "claude",
+      "pid": "1234",
+      "cwd": "/home/x",
+      "transcript": "",
+      "session_id": "abc"
+    }
+  },
+  {
+    "name": "parse_registry_record/three_field_dropped",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\tclaude\t1234"
+    },
+    "expected": null
+  },
+  {
+    "name": "parse_registry_record/one_field_dropped",
+    "input": {
+      "name": "claude-abc",
+      "contents": "junkline"
+    },
+    "expected": null
+  },
+  {
+    "name": "parse_registry_record/copilot_5field",
+    "input": {
+      "name": "copilot-xyz",
+      "contents": "%1\tcopilot\t99\t/w\t"
+    },
+    "expected": {
+      "pane": "%1",
+      "agent": "copilot",
+      "pid": "99",
+      "cwd": "/w",
+      "transcript": "",
+      "session_id": "xyz"
+    }
+  },
+  {
+    "name": "parse_registry_record/name_without_prefix",
+    "input": {
+      "name": "weird",
+      "contents": "%3\tclaude\t1234\t/home/x"
+    },
+    "expected": {
+      "pane": "%3",
+      "agent": "claude",
+      "pid": "1234",
+      "cwd": "/home/x",
+      "transcript": "",
+      "session_id": "weird"
+    }
+  },
+  {
+    "name": "parse_registry_record/trailing_newline_only_stripped",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\tclaude\t1234\t/home/x\n"
+    },
+    "expected": {
+      "pane": "%3",
+      "agent": "claude",
+      "pid": "1234",
+      "cwd": "/home/x",
+      "transcript": "",
+      "session_id": "abc"
+    }
+  },
+  {
+    "name": "parse_registry_record/six_field_extra_ignored",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\tclaude\t1234\t/home/x\t/t.jsonl\tEXTRA"
+    },
+    "expected": {
+      "pane": "%3",
+      "agent": "claude",
+      "pid": "1234",
+      "cwd": "/home/x",
+      "transcript": "/t.jsonl",
+      "session_id": "abc"
+    }
+  },
+  {
+    "name": "parse_registry_record/legacy_paneless",
+    "input": {
+      "name": "claude-leg",
+      "contents": "\t/home/y"
+    },
+    "expected": {
+      "pane": "",
+      "agent": "claude",
+      "pid": "",
+      "cwd": "/home/y",
+      "transcript": "",
+      "session_id": "leg"
+    }
+  },
+  {
+    "name": "label_mode_from/'dir'",
+    "input": {
+      "value": "dir"
+    },
+    "expected": "dir"
+  },
+  {
+    "name": "label_mode_from/'DIR'",
+    "input": {
+      "value": "DIR"
+    },
+    "expected": "dir"
+  },
+  {
+    "name": "label_mode_from/' Dir '",
+    "input": {
+      "value": " Dir "
+    },
+    "expected": "dir"
+  },
+  {
+    "name": "label_mode_from/'name'",
+    "input": {
+      "value": "name"
+    },
+    "expected": "name"
+  },
+  {
+    "name": "label_mode_from/''",
+    "input": {
+      "value": ""
+    },
+    "expected": "name"
+  },
+  {
+    "name": "label_mode_from/'xyz'",
+    "input": {
+      "value": "xyz"
+    },
+    "expected": "name"
+  },
+  {
+    "name": "label_mode_from/'  '",
+    "input": {
+      "value": "  "
+    },
+    "expected": "name"
+  },
+  {
+    "name": "label_mode_from/'directory'",
+    "input": {
+      "value": "directory"
+    },
+    "expected": "name"
+  },
+  {
+    "name": "agent_label/teammate_name_with_title",
+    "input": {
+      "mode": "name",
+      "title": "Fix bug",
+      "agent_name": "alice",
+      "dir_name": "proj"
+    },
+    "expected": "@alice - Fix bug"
+  },
+  {
+    "name": "agent_label/teammate_name_no_title",
+    "input": {
+      "mode": "name",
+      "title": "",
+      "agent_name": "alice",
+      "dir_name": "proj"
+    },
+    "expected": "@alice"
+  },
+  {
+    "name": "agent_label/teammate_dir_mode",
+    "input": {
+      "mode": "dir",
+      "title": "Fix bug",
+      "agent_name": "alice",
+      "dir_name": "proj"
+    },
+    "expected": "@alice - proj"
+  },
+  {
+    "name": "agent_label/teammate_dir_mode_empty_dir",
+    "input": {
+      "mode": "dir",
+      "title": "Fix bug",
+      "agent_name": "alice",
+      "dir_name": ""
+    },
+    "expected": "@alice"
+  },
+  {
+    "name": "agent_label/toplevel_name_with_title",
+    "input": {
+      "mode": "name",
+      "title": "Fix bug",
+      "agent_name": "",
+      "dir_name": "proj"
+    },
+    "expected": "Fix bug"
+  },
+  {
+    "name": "agent_label/toplevel_name_no_title",
+    "input": {
+      "mode": "name",
+      "title": "",
+      "agent_name": "",
+      "dir_name": "proj"
+    },
+    "expected": "proj"
+  },
+  {
+    "name": "agent_label/toplevel_dir_mode",
+    "input": {
+      "mode": "dir",
+      "title": "Fix bug",
+      "agent_name": "",
+      "dir_name": "proj"
+    },
+    "expected": "proj"
+  },
+  {
+    "name": "agent_label/toplevel_dir_mode_empty_dir",
+    "input": {
+      "mode": "dir",
+      "title": "Fix bug",
+      "agent_name": "",
+      "dir_name": ""
+    },
+    "expected": ""
+  },
+  {
+    "name": "agent_label/toplevel_name_no_title_no_dir",
+    "input": {
+      "mode": "name",
+      "title": "",
+      "agent_name": "",
+      "dir_name": ""
+    },
+    "expected": ""
+  },
+  {
+    "name": "scan_tail/ai_title_only",
+    "input": {
+      "transcript": "{\"type\": \"ai-title\", \"aiTitle\": \"Auto Name\"}\n"
+    },
+    "expected": [
+      "",
+      "Auto Name",
+      "",
+      "",
+      ""
+    ]
+  },
+  {
+    "name": "scan_tail/custom_overrides_ai",
+    "input": {
+      "transcript": "{\"type\": \"ai-title\", \"aiTitle\": \"Auto Name\"}\n{\"type\": \"custom-title\", \"customTitle\": \"Manual Name\"}\n"
+    },
+    "expected": [
+      "Manual Name",
+      "Auto Name",
+      "",
+      "",
+      ""
+    ]
+  },
+  {
+    "name": "scan_tail/agent_color",
+    "input": {
+      "transcript": "{\"type\": \"agent-color\", \"agentColor\": \"cyan\"}\n"
+    },
+    "expected": [
+      "",
+      "",
+      "",
+      "",
+      "cyan"
+    ]
+  },
+  {
+    "name": "scan_tail/teammate_agentname_teamname",
+    "input": {
+      "transcript": "{\"type\": \"user\", \"agentName\": \"bob\", \"teamName\": \"squad\"}\n"
+    },
+    "expected": [
+      "",
+      "",
+      "bob",
+      "squad",
+      ""
+    ]
+  },
+  {
+    "name": "scan_tail/agentname_in_agent_name_record_ignored",
+    "input": {
+      "transcript": "{\"type\": \"agent-name\", \"agentName\": \"ignored\"}\n"
+    },
+    "expected": [
+      "",
+      "",
+      "",
+      "",
+      ""
+    ]
+  },
+  {
+    "name": "scan_tail/malformed_json_skipped",
+    "input": {
+      "transcript": "{\"type\": \"ai-title\", \"aiTitle\": \"Good\"}\n{\"type\": \"ai-title\", broken\n"
+    },
+    "expected": [
+      "",
+      "Good",
+      "",
+      "",
+      ""
+    ]
+  },
+  {
+    "name": "scan_tail/last_ai_title_wins",
+    "input": {
+      "transcript": "{\"type\": \"ai-title\", \"aiTitle\": \"First\"}\n{\"type\": \"ai-title\", \"aiTitle\": \"Second\"}\n"
+    },
+    "expected": [
+      "",
+      "Second",
+      "",
+      "",
+      ""
+    ]
+  },
+  {
+    "name": "scan_tail/all_fields_together",
+    "input": {
+      "transcript": "{\"type\": \"ai-title\", \"aiTitle\": \"Auto\"}\n{\"type\": \"custom-title\", \"customTitle\": \"Manual\"}\n{\"type\": \"agent-color\", \"agentColor\": \"green\"}\n{\"type\": \"assistant\", \"agentName\": \"carol\", \"teamName\": \"t1\"}\n"
+    },
+    "expected": [
+      "Manual",
+      "Auto",
+      "carol",
+      "t1",
+      "green"
+    ]
+  },
+  {
+    "name": "scan_tail/empty_ai_title_not_taken",
+    "input": {
+      "transcript": "{\"type\": \"ai-title\", \"aiTitle\": \"\"}\n"
+    },
+    "expected": [
+      "",
+      "",
+      "",
+      "",
+      ""
+    ]
+  },
+  {
+    "name": "scan_tail/no_relevant_records",
+    "input": {
+      "transcript": "{\"type\": \"user\", \"message\": \"hi\"}\n"
+    },
+    "expected": [
+      "",
+      "",
+      "",
+      "",
+      ""
+    ]
+  }
+]

@@ -1,0 +1,155 @@
+{
+  "module": "assoc",
+  "pure": false,
+  "target_path": "src/daemon/assoc.rs",
+  "source_refs": [
+    "scripts/sidebar.py:241 strip_status_prefix",
+    "scripts/sidebar.py:304 pid_alive",
+    "scripts/sidebar.py:314 ppid_map",
+    "scripts/sidebar.py:332 process_under",
+    "scripts/sidebar.py:354 _attention_token",
+    "scripts/sidebar.py:366 fetch_agent_sessions",
+    "scripts/sidebar.py:406 all_panes gather",
+    "scripts/sidebar.py:411 pass1 parse/prune loop",
+    "scripts/sidebar.py:431 registry record parse incl legacy 2-field",
+    "scripts/sidebar.py:439 dead-pid prune",
+    "scripts/sidebar.py:446 stale-pane prune",
+    "scripts/sidebar.py:449 session_id derivation",
+    "scripts/sidebar.py:463 pane_owner title match + tiebreak",
+    "scripts/sidebar.py:478 pass2 placement / process_under",
+    "scripts/sidebar.py:492 status derivation from markers",
+    "scripts/sidebar.py:500 place() cwd/dir_name/label",
+    "scripts/agent-hook.sh:85 registry record write format",
+    "scripts/agent-hook.sh:156 attention marker write format",
+    "scripts/agent-hook.sh:105 cut -f preserves empty pane field"
+  ],
+  "functions": [
+    {
+      "name": "ppid_map",
+      "signature": "fn ppid_map() -> HashMap<u32, u32>",
+      "behavior": "Runs `ps -e -o pid= -o ppid=` once (capture stdout, text). For each output line, whitespace-splits it and, when there are >=2 tokens AND token0 is all-ASCII-digits AND token1 is all-ASCII-digits, inserts parents[pid]=ppid. Returns the pid->ppid map. Deliberately avoids /proc so it works identically on Linux and macOS/BSD (the `pid=`/`ppid=` empty headers suppress the header row on both).",
+      "side_effects": "Spawns the `ps` subprocess (read-only). No filesystem writes.",
+      "edge_cases": [
+        "`ps` not found / spawn fails (OSError): return empty map (Python catches OSError only around subprocess.run; a non-zero exit still yields whatever stdout was produced).",
+        "Lines with fewer than 2 tokens, or a non-numeric token in either column, are silently skipped (e.g. a stray header, a `[kernel]` line with spaces).",
+        "Uses `str.split()` semantics (split on any run of whitespace, leading/trailing trimmed) not split(' '); Rust must use split_whitespace, not split(' ').",
+        "Digit check is Python `str.isdigit()`, which is true only for non-empty all-digit strings but ALSO matches some non-ASCII digit codepoints; pids are ASCII so port with ASCII-digit check and note the (practically-unreachable) divergence.",
+        "Duplicate pid rows (shouldn't occur): last write wins, matching dict assignment."
+      ]
+    },
+    {
+      "name": "process_under",
+      "signature": "fn process_under(pid: u32, ancestor: u32, parents: &HashMap<u32, u32>) -> bool",
+      "behavior": "Returns whether `ancestor` is `pid` itself or one of its forebears by walking the pid->ppid map. If ancestor is 0 (falsy: no recorded pane_pid), returns false immediately. Otherwise loops up to 4096 times: return true if pid==ancestor; return false if pid<=1; else set pid = parents.get(pid).unwrap_or(0) and continue. Falls out of the bounded loop as false. This is the check that a recorded pane genuinely hosts the agent (descends from `#{pane_pid}`) vs merely inherited TMUX_PANE into a detached/GUI host.",
+      "side_effects": "None (pure given the map).",
+      "edge_cases": [
+        "ancestor==0 -> false before any lookup (mirrors `if not ancestor`).",
+        "Order is load-bearing: equality (pid==ancestor) is tested BEFORE the pid<=1 guard, so pid==ancestor==1 returns true; pid==ancestor==0 never reached because ancestor==0 short-circuits.",
+        "pid<=1 (reached init/PID0 sentinel) -> false.",
+        "Missing key in map -> parents.get returns 0 -> next iteration hits pid<=1 -> false.",
+        "Bounded to exactly 4096 iterations so a cycle or truncated/corrupt map cannot infinite-loop; after 4096 hops returns false. Preserve the exact bound.",
+        "pid/ancestor are u32 from tmux `#{pane_pid}` and the record's pid field; the record pid is only passed here after an isdigit gate (see fetch_agent_sessions)."
+      ]
+    },
+    {
+      "name": "attention_token",
+      "signature": "fn attention_token(path: &Path) -> Option<i128>",
+      "behavior": "Reads the attention marker file, trims trailing/leading whitespace of its contents. If the trimmed content is all-digits, returns it parsed as an integer token (the monotonic event token agent-hook.sh writes as `<token>\\n`). Otherwise returns the file's st_mtime in nanoseconds (legacy empty markers carry no token, so their mtime is the event identity). Returns None if the file cannot be read/opened (OSError -> None, i.e. marker absent).",
+      "side_effects": "Filesystem read + stat only.",
+      "edge_cases": [
+        "File missing / unreadable -> None (this is how callers detect 'no attention').",
+        "Empty or non-numeric contents -> mtime_ns fallback (legacy markers written before tokens existed).",
+        "Token width: mtime_ns is ~1.75e18 and a written token is a small counter; both fit i64, but use i128 to mirror Python's unbounded int and to stay identical to the notify module's `_claim_attention` comparison and `acknowledge_focused_attention` equality (same type must be used across all three or ordering/equality can diverge).",
+        "`str.isdigit()` again: numeric token is ASCII from printf; use ASCII-digit check.",
+        "mtime nanoseconds must come from the same stat semantics (st_mtime_ns), not a truncated seconds*1e9; two markers touched within the same second but different ns must stay distinguishable."
+      ]
+    },
+    {
+      "name": "strip_status_prefix",
+      "signature": "fn strip_status_prefix(title: &str) -> String",
+      "behavior": "Removes the leading status glyph Claude Code prefixes onto a pane/terminal title ('<glyph> <session title>'; glyph is a braille spinner frame while working or `\u2733` when idle, always a single non-alphanumeric token). Trims the title; partitions on the FIRST ASCII space; if a space was found AND the head token contains no alphanumeric character, returns the trimmed remainder; otherwise returns the trimmed whole title. Used both when building pane rows and to produce the pane-title strings matched against session titles in fetch_agent_sessions.",
+      "side_effects": "None (pure string op).",
+      "edge_cases": [
+        "Empty/whitespace-only title -> '' (partition yields no separator -> returns trimmed title '').",
+        "Title with no space (single glyph like '\u2733') -> no separator -> returned as-is trimmed (glyph NOT stripped; only glyph+space+title strips).",
+        "Head containing any alnum char (e.g. real title starting with a word, or a weird 'x2') -> not stripped, whole title kept.",
+        "partition splits on a single ASCII space only, while the outer trim uses Python str.strip() (all Unicode whitespace incl. tab/newline/NBSP-adjacent). Rust: split on ' ' but trim with a Unicode-whitespace trim to match; do not use split_whitespace for the partition step.",
+        "Alphanumeric test is Python `str.isalnum()` over each char (any() ... isalnum). Braille (U+2800..) and \u2733 are non-alnum. Rust `char::is_alphanumeric` covers Unicode L*/N* and is close but not byte-identical to Python's isalnum (which is isalpha|isdecimal|isdigit|isnumeric); note as a low-risk divergence for exotic codepoints.",
+        "Return is always the trimmed form (both branches call .strip()); trailing whitespace on the kept title is removed."
+      ]
+    },
+    {
+      "name": "parse_registry_record",
+      "signature": "fn parse_registry_record(name: &str, contents: &str) -> Option<RegistryRecord>  // RegistryRecord { pane, agent, pid, cwd, transcript, session_id }",
+      "behavior": "Parses one registry file. Strips ONLY trailing newline characters from contents (Python `rstrip(\"\\n\")` removes all trailing '\\n' but NOT tabs/spaces), then splits on TAB (no max-split). Field-count dispatch: exactly 2 fields -> legacy claude-hook.sh format (pane=f0, agent='claude', pid='', cwd=f1, transcript=''); >=4 fields -> current format (pane=f0, agent=f1, pid=f2, cwd=f3, transcript=f4 if present else ''); any other count (0,1,3) -> None (record ignored). Derives session_id from the filename: prefix = agent+'-'; if name starts with prefix, session_id = name[prefix.len()..], else session_id = name.",
+      "side_effects": "None (caller supplies contents; the file read + prune is in fetch_agent_sessions).",
+      "edge_cases": [
+        "CRITICAL: rstrip only '\\n', never tabs \u2014 a pane-less (daemon) record is written with an empty leading field ('\\tagent\\tpid\\tcwd\\ttranscript'); a full strip/trim would eat that leading tab and shift every field left, corrupting it. And a trailing empty transcript field ('pane\\tagent\\tpid\\tcwd\\t') must keep its 5th empty field. Use trim_end_matches('\\n') only.",
+        "3-field records are silently dropped (falls through the len==2 / len>=4 dispatch to `continue`). Preserve this \u2014 do not treat 3 fields as a partial current record.",
+        "1-field (no tab, e.g. junk) -> dropped.",
+        "Legacy 2-field record has pid='' (empty, not a digit) and transcript='' -> downstream: never pruned for dead pid, trusted for the recorded pane without a process_under check (see fetch_agent_sessions), and yields no session_meta title.",
+        "transcript field may contain more tabs in theory; split without max-split means only f4 is taken as transcript and extra fields beyond index 4 are ignored (paths practically never contain tabs).",
+        "Must accept both Claude 'claude-<id>' and Copilot 'copilot-<id>' filenames; agent value comes from the record body (f1), and session_id strips the '<agent>-' prefix using that body agent, not a hardcoded 'claude-'."
+      ]
+    },
+    {
+      "name": "fetch_agent_sessions",
+      "signature": "fn fetch_agent_sessions(&self, pane_to_window: &HashMap<PaneId, WindowRef>, pane_paths: &HashMap<PaneId, String>, pane_titles: &HashMap<PaneId, String>, pane_pids: &HashMap<PaneId, u32>) -> Vec<AgentSession>",
+      "behavior": "Two-pass association. Setup: list REGISTRY dir SORTED by filename (sorted(os.listdir)); OSError -> return empty. Read label_mode() (tmux option, labels module). Gather all_panes = set of every pane id on the whole server via `tmux list-panes -a -F '#{pane_id}'` split on whitespace. PASS 1 (parse+prune, in sorted order): read each file; parse via parse_registry_record; PRUNE (unlink registry file + attention marker + working marker, best-effort) and skip when (a) pid is all-digits AND pid_alive(pid) is false, or (b) pane is non-empty AND pane not in pane_to_window AND pane not in all_panes AND pid is NOT all-digits; resolve session_meta(transcript, agent, session_id) -> (title, agent_name, team, color); collect a candidate {id=filename, agent, recorded_pane=pane, pid, cwd, title, agent_name, team, color, attn_marker, work_marker}. Build pane_owner: for each (pid,ptitle) in pane_titles, skip empty ptitle; matches = candidates whose title==ptitle; if exactly one -> pane_owner[pid]=that id; if >1 -> tiebreak pool = candidates with recorded_pane==pid, else (if that list empty) candidates with cwd==pane_paths.get(pid); if pool has exactly one -> owner, else leave unassigned. PASS 2 (placement): parents = ppid_map() (ONE snapshot backing every ancestry check). For each candidate in sorted order: matched = [recorded_pane] iff recorded_pane in pane_to_window AND (pid not all-digits OR process_under(pid, pane_pids.get(recorded_pane, 0), parents)); then append every pane whose pane_owner==this id and not already in matched (iterating pane_owner in its insertion order = pane_titles order). Compute attention_token=attention_token(attn_marker); status = 'attention' if token is Some else ('working' if work_marker exists else ''); team_colors = team_pane_colors(team) only if (color is empty AND agent_name non-empty) else empty (color module). If matched is empty -> DROP the session (not listed detached). Else emit one placement per matched pane: display_cwd = pane_paths.get(pane) or candidate.cwd; dir_name = basename(display_cwd.trim_end_matches('/')) or display_cwd; label = agent_label(mode, title, agent_name, dir_name); color = candidate.color or team_colors.get(pane). Returns the flat placement list.",
+      "side_effects": "Reads REGISTRY dir + each record file + attention/working markers; transcript + team-config reads via session_meta/team_pane_colors. WRITES: unlinks stale registry records and their attention+working markers (prune). Spawns `tmux list-panes -a` and `ps` (ppid_map). Order-sensitive because the returned list order drives row order.",
+      "edge_cases": [
+        "REGISTRY unreadable/missing -> []. Must iterate names in sorted (lexicographic byte/Unicode) order to match sorted(os.listdir); this fixes tiebreak determinism and row order.",
+        "Prune is best-effort: each unlink swallows errors; a race where another process already removed the file is fine.",
+        "Dead-pid prune only triggers when pid IS all-digits; legacy '' pid never prunes on liveness.",
+        "Stale-pane prune requires ALL of: non-empty pane, not local, not anywhere on server, and non-digit pid \u2014 a record with a live pid is kept even if its pane vanished (another sidebar/session may own it, or capture failed); a legacy record (non-digit pid) whose pane is truly gone is pruned.",
+        "A recorded pane counts as a placement only when occupied (process_under) OR the record is legacy (non-digit pid, trusted). An inherited-but-not-occupied pane id yields matched=[] from the recorded pane and associates only via title match.",
+        "Title matching: empty pane titles never match (skipped); an empty candidate title cannot match a skipped empty ptitle either. Both guards must hold.",
+        "Tiebreak precedence is exactly recorded_pane THEN cwd; if still ambiguous leave unassigned (better no jump than wrong). The `or` short-circuit means cwd tiebreak is only consulted when the recorded_pane filter produced an EMPTY list, not merely a non-singleton one.",
+        "A session shown in N panes yields N placements (listed under each pane's window); one shown in no local pane is dropped and reappears when a pane shows it.",
+        "ppid_map is taken once per call (snapshot) so all process_under checks see a consistent table; do not re-run ps per candidate.",
+        "display_cwd falls back to recorded cwd when pane_paths has no entry (Python `or` treats empty string as falsy too, so an empty pane path also falls back).",
+        "dir_name: basename after stripping trailing '/'; if that is empty (e.g. cwd '/') fall back to the whole display_cwd (Python `os.path.basename(x.rstrip('/')) or x`).",
+        "pane_owner is consulted for the SAME candidate whose recorded pane may already be in matched; the `pid not in matched` guard prevents a duplicate placement when recorded pane == a title-matched pane.",
+        "color precedence: transcript /color wins; else teammate team color by pane; team config only read when color empty AND agent_name set (avoids reading team configs for non-teammates)."
+      ]
+    },
+    {
+      "name": "pid_alive",
+      "signature": "fn pid_alive(pid: u32) -> bool",
+      "behavior": "Whether a pid is still live. Python sends signal 0 via os.kill(pid,0): ProcessLookupError (ESRCH) -> false; any other OSError (e.g. EPERM: exists but not ours) -> true; success -> true. Used only by fetch_agent_sessions' dead-pid prune. Could live in the `glue` module instead of `assoc`; noted here because assoc is its sole caller.",
+      "side_effects": "Sends signal 0 (no delivery) to the pid.",
+      "edge_cases": [
+        "ESRCH (no such process) -> false (the only false path).",
+        "EPERM (process exists, owned by another user) -> true (must NOT prune).",
+        "pid==0 semantics: os.kill(0,...) targets the process group; the port should guard/only be called with the record's digit pid (which is a real pid), matching how Python only calls it when pid.isdigit().",
+        "Only ProcessLookupError maps to false; every other error is treated as alive."
+      ]
+    }
+  ],
+  "depends_on": [
+    "labels",
+    "color",
+    "tmux",
+    "glue"
+  ],
+  "parity_risks": [
+    "Registry parse must rstrip ONLY '\\n' (not tabs/spaces): stripping tabs corrupts pane-less (empty leading pane) and empty-trailing-transcript records \u2014 the #1 back-compat trap. Mirror agent-hook.sh's use of `cut -f` (empty-preserving), never `read`/trim.",
+    "Field-count dispatch drops 3-field and 1-field records silently; only 2 (legacy) and >=4 (current, 4 or 5+) are accepted. Do not 'helpfully' accept 3.",
+    "Legacy 2-field record semantics: pid='' (skips liveness prune, skips process_under so recorded pane is trusted), agent forced to 'claude', empty transcript => no title/color. Preserve all four behaviors.",
+    "process_under is bounded to exactly 4096 iterations and checks pid==ancestor BEFORE pid<=1; both the bound and the check order are load-bearing (cycle safety; ancestor==1 case).",
+    "ancestor/pane_pid of 0 (falsy) short-circuits process_under to false; a missing pane_pids entry must default to 0, not panic.",
+    "attention token type/ordering: numeric token vs mtime-ns fallback share one integer domain compared across attention_token, acknowledge_focused_attention, and notify's _claim_attention. Use the same wide integer (i128 recommended) everywhere or dedup/equality drifts.",
+    "mtime nanoseconds must be true st_mtime_ns, not seconds*1e9; sub-second resolution distinguishes consecutive legacy-marker events.",
+    "Iteration ordering: registry names MUST be sorted (sorted(os.listdir)) \u2014 it sets candidate order, title-collision tiebreak inputs, and final row order. pane_titles / pane_owner iteration follows tmux list-panes order; preserve insertion order (use an order-preserving map).",
+    "Title tiebreak uses Python `or` short-circuit: cwd tiebreak is consulted only when the recorded_pane filter yields an EMPTY list, not merely a non-unique one. A naive 'try recorded_pane, if not unique try cwd' would diverge.",
+    "'Empty titles never match' invariant: skip empty pane titles AND ensure empty candidate titles don't associate. Both sides.",
+    "str.isdigit()/isalnum() vs Rust: Python accepts some non-ASCII digits and a broader numeric set. Use ASCII-digit checks for numeric fields (tokens/pids are ASCII) and note strip_status_prefix's isalnum divergence on exotic codepoints as low-risk.",
+    "str.split()/str.strip() (Unicode-whitespace, run-collapsing) vs split(' '): ppid_map uses whitespace-split; strip_status_prefix partitions on a single ASCII space but trims Unicode whitespace. Match each precisely.",
+    "Prune is a destructive side effect gated by exact conditions; mis-ordering the two prune branches or loosening the stale-pane predicate (needs non-empty pane AND not-local AND not-on-server AND non-digit-pid together) will delete live records.",
+    "Mutual exclusion of status: 'attention' (token present) strictly wins over 'working' (marker present); never both. agent-hook.sh keeps them mutually exclusive by deleting the other, but the sidebar also enforces attention>working here.",
+    "ppid_map taken as a single snapshot per fetch call; re-sampling ps per candidate would produce inconsistent ancestry results under process churn.",
+    "display_cwd/dir_name fallbacks rely on Python truthiness of empty strings (empty pane path falls back to recorded cwd; empty basename falls back to full path). Replicate the empty-string-as-falsy behavior.",
+    "session_id derivation strips the body-agent's '<agent>-' prefix, not a literal 'claude-'; a mismatched filename (no prefix) keeps the whole name.",
+    "all_panes and record-pane checks use pane ids as opaque strings (e.g. '%12'); the spawn-race/lower-numbered comparison elsewhere parses the numeric suffix \u2014 keep pane ids as strings here and only parse suffixes where Python does."
+  ]
+}

@@ -1,0 +1,200 @@
+{
+  "module": "client",
+  "pure": false,
+  "target_path": "src/client/mod.rs",
+  "functions": [
+    {
+      "name": "run_sidebar",
+      "signature": "pub fn run_sidebar(sidebar_pane: &str) -> io::Result<()>",
+      "behavior": "Owns the single event loop that replaces main() (sidebar.py:924-1123). Fixed cadence: TICK=16ms (getch/poll timeout and loop ceiling), POLL_INTERVAL=1.0s between tmux data polls, ANIM_INTERVAL=0.0625s (~16fps) between spinner-frame advances. Per tick: (1) read at most one input event blocking up to TICK, set input_detected/force_poll and dispatch it against the rows/keys/items/offset CURRENTLY ON SCREEN (the previous build); (2) if force_poll || cached.is_none() || now-last_poll>=POLL_INTERVAL run poll() to refresh the cached snapshot (and possibly self-exit); (3) advance frame by +1 if now-last_frame>=ANIM_INTERVAL; (4) rebuild rows only when need_build = polled || (frame_advanced && animating); recompute items/keys, re-default selected_key if it left keys, recompute animating; (5) repaint only when dirty = input_detected || (frame_advanced && animating) || snapshot != last_painted, where snapshot=(cached, selected_key). Idle sidebar loops at TICK but rebuilds/repaints no more than the poll cadence.",
+      "side_effects": "Terminal draw; tmux subprocess queries; sidebar resize-pane requests; writes to selection/width/notified state files; terminal bell + OSC desktop notifications (via notify); enables mode-1004 focus reporting on entry and disables on exit.",
+      "edge_cases": [
+        "force_poll=true and cached=None at init so the first tick always polls before any draw",
+        "first tick: rows/keys/items are empty, but input branches are guarded by non-empty keys/rows so getch=-1 and the empty lists never index-panic",
+        "input is acted on against the PREVIOUS build (stale but index-valid lists + last draw offset), then force_poll rebuilds afterwards \u2014 order preserved so activation matches what the user sees",
+        "a poll whose fetched data is value-identical and whose selected_key is unchanged must NOT repaint (snapshot structural equality vs last_painted)",
+        "frame advances by exactly +1 per qualifying tick (no elapsed-based catch-up if the loop stalls)",
+        "keys is guaranteed non-empty after any successful poll (>=1 window row), so the keys[0] default fallback is safe",
+        "selected_key starts None; adopted from the selection file or defaulted to the active-window row before first paint"
+      ]
+    },
+    {
+      "name": "poll",
+      "signature": "fn poll(st: &mut LoopState, sidebar_pane: &str) -> Result<Cached, ExitReason>",
+      "behavior": "The data-poll body (sidebar.py:1011-1094). Calls fetch_windows; runs self_exit checks; computes has_focus = me.active && sidebar_active; runs width_sync; adopts the shared selection (read_selection); computes focused_panes (active panes of active windows); calls fetch_agent_sessions; then notify_attention BEFORE acknowledge_focused_attention; builds pane_status (attention beats working); reads hook_on/osc_on toggles; returns Cached=(windows, sessions, pane_progress, pane_status, hook_on, osc_on, has_focus).",
+      "side_effects": "Same as loop (tmux queries, resize requests, file writes, bell/notify).",
+      "edge_cases": [
+        "notify_attention MUST run before acknowledge_focused_attention \u2014 signal fires before focus clears the attention marker (timing invariant)",
+        "has_focus is a tmux fact (active pane of active window is this sidebar), NOT the terminal focus-event state \u2014 only the focused sidebar shows the selection bar, else the shared selection reads as a live cursor on every window",
+        "focused_panes deliberately excludes sidebar panes (fetch_windows already dropped them)",
+        "pane_status precedence (attention over working) must hold regardless of session iteration order"
+      ]
+    },
+    {
+      "name": "self_exit",
+      "signature": "fn self_exit(sidebar_pane: &str, windows: &[Window], pane_to_window: &Map, sidebars: &Set, me: Option<&Window>) -> Option<ExitReason>",
+      "behavior": "The four self-exit conditions (sidebar.py:1015-1030). Exit if: fetch_windows returned no windows; pane_to_window has no entry for SIDEBAR_PANE (this pane is gone); another sidebar pane in the SAME window has a lower integer pane id (spawn race \u2014 parse `%N` by stripping the leading '%'); or me has no real panes left (tmux then closes the window).",
+      "side_effects": "None (returns an exit signal; the caller returns from run_sidebar).",
+      "edge_cases": [
+        "pane-id comparison strips the leading '%' and compares as integers (int(p[1:]) < int(SIDEBAR_PANE[1:]))",
+        "spawn-race check only considers sidebars whose pane_to_window maps to `me`",
+        "must run inside the poll before any other use of `me`"
+      ]
+    },
+    {
+      "name": "handle_input",
+      "signature": "fn handle_input(ev: Event, st: &mut LoopState, rows: &[Row], keys: &[Key], items: &[Item]) -> Flow",
+      "behavior": "Dispatch one input event (sidebar.py:979-1008). q/Q -> run toggle.sh through the server (tmux run-shell -b <dir>/toggle.sh) and return Quit. Up/k -> move_selection up. Down/j -> move_selection down. Enter (KEY_ENTER/10/13) -> activate(items[index_of(selected_key)]). Left mouse press/click -> row_idx = mouse_y + offset; if in range and that row is selectable, set selected_key, write_selection, activate. KEY_RESIZE has no branch (input_detected marks the tick dirty; draw recomputes from new dimensions).",
+      "side_effects": "write_selection to the state file; tmux select-window/select-pane (via activate); tmux run-shell for quit.",
+      "edge_cases": [
+        "all nav/enter branches guarded by non-empty keys; mouse branch guarded by non-empty rows",
+        "keys.index(selected) is defensively treated as 0 if absent (normally impossible \u2014 selected_key is always kept in keys by the rebuild)",
+        "getmouse failure -> treat as no button / row -1 and ignore",
+        "click on a non-selectable (header/blank) row is ignored",
+        "q must go through the server (run-shell -b), NEVER exec toggle.sh as a child of this pane \u2014 the child would be killed when its own pane closes, leaving the other sidebars up",
+        "mouse hit-testing uses the offset from the LAST draw, applied to the previously-built rows"
+      ]
+    },
+    {
+      "name": "move_selection",
+      "signature": "fn move_selection(keys: &[Key], selected: &mut Key, delta: isize)",
+      "behavior": "Move the shared selection one selectable row (sidebar.py:988-993, prototype:744-752). Clamp current_index+delta to [0, len-1], set selected, and write_selection so peer sidebars adopt it.",
+      "side_effects": "write_selection.",
+      "edge_cases": [
+        "empty keys -> no-op",
+        "selected not found in keys -> treat position as 0"
+      ]
+    },
+    {
+      "name": "draw",
+      "signature": "fn draw(f: &mut Frame, rows: &[Row], selected: &Key, offset: usize, has_focus: bool) -> usize",
+      "behavior": "Render the visible viewport and return the (possibly adjusted) offset (sidebar.py:835-898, prototype:558-606). sel_row = index of the dict row whose key == selected, else 0. Scroll to keep sel_row visible: if sel_row<offset offset=sel_row; elif sel_row>=offset+height offset=sel_row-height+1; then clamp offset to [0, max(0, len-height)]. Erase, then draw each visible row via render_line.",
+      "side_effects": "Writes to the terminal buffer.",
+      "edge_cases": [
+        "offset clamped to [0, max(0, rows-height)]",
+        "sel_row falls back to 0 when the selected key is not present",
+        "zero width/height -> render nothing",
+        "returned offset is threaded back into the loop and reused for the next mouse hit-test"
+      ]
+    },
+    {
+      "name": "row_style",
+      "signature": "fn row_style(row: &Row, has_focus: bool, selected: bool) -> Style",
+      "behavior": "Compute a row's base attribute (sidebar.py:849-870, prototype:184-214). header: BOLD|UNDERLINE. window: BOLD, plus the active-window green cue (color pair 1) when the window carries no explicit color. agent: the agent's assigned color pair (Claude /color or team color; default cyan pair 2 when none), plus BOLD when status is attention or working. pane/blank/None: DIM. Then OR in REVERSE when has_focus && selected.",
+      "side_effects": "None.",
+      "edge_cases": [
+        "unknown/empty agent color name -> default cyan (empty color never matches a pair)",
+        "the active-window green default applies only when no explicit window color is set",
+        "the working/attention bold emphasis is independent of the pinned indicator so it survives indicator truncation"
+      ]
+    },
+    {
+      "name": "render_line",
+      "signature": "fn render_line(row: &Row, width: usize, frame: usize, selected: bool) -> Line",
+      "behavior": "Lay out one row with its right-pinned indicator (sidebar.py:871-896, prototype:517-549). field=width-1 (reserve the last column). Resolve the indicator (text,color) for `frame`. If text is non-empty and field >= indicator_len+2: reserve=indicator_len+1; draw fit(text, field-reserve) in the base/selected style and draw \" {indicator}\" in the indicator's OWN color pair (or the base attr when it has none), applying REVERSE to both spans when selected so the selection bar stays continuous. Otherwise draw fit(text, field) with no indicator.",
+      "side_effects": "None (returns styled spans).",
+      "edge_cases": [
+        "indicator carries its own OSC-state color pair separate from the row color, but shares the REVERSE bar",
+        "too-narrow pane (field < indicator_len+2) drops the indicator and fits the full text",
+        "curses addnstr errors on last-cell writes are swallowed (no crash) in the Python original"
+      ]
+    },
+    {
+      "name": "fit",
+      "signature": "fn fit(text: &str, field: usize) -> String",
+      "behavior": "Fit text to exactly `field` columns (sidebar.py:808-815, prototype:498-515): field==0 -> empty; char-count > field -> first field-1 chars + '\u2026' (or just '\u2026' when field==1); else left-pad with spaces to `field` so the reverse-video selection bar is solid.",
+      "side_effects": "None.",
+      "edge_cases": [
+        "counts Unicode scalar values, NOT display cells \u2014 wide/CJK glyphs are miscounted; this matches Python len() and must be preserved for parity (do not switch to unicode-width)",
+        "ellipsis and braille spinner glyphs are single code points, so the 1-column reservation holds"
+      ]
+    },
+    {
+      "name": "set_focus_reporting",
+      "signature": "fn set_focus_reporting(enabled: bool)",
+      "behavior": "Toggle DEC private mode 1004 for this tty by emitting ESC[?1004h / ESC[?1004l (sidebar.py:901-922). With crossterm this is EnableFocusChange/DisableFocusChange. Must be enabled on entry and disabled on EVERY exit path (the Python original registers an atexit handler).",
+      "side_effects": "Writes an escape sequence to stdout.",
+      "edge_cases": [
+        "Python does NOT decode the focus report \u2014 it relies on the report merely waking getch so the next poll recomputes has_focus from tmux; the Rust client must likewise treat FocusGained/FocusLost ONLY as a wake/redraw trigger and NOT set has_focus from the terminal event (has_focus is a tmux fact) \u2014 this is a real divergence from the prototype, which sets state.has_focus from the crossterm event (prototype:719-720)",
+        "the Python hazard 'do not intercept a raw ESC (a fragmented arrow key)' is handled by crossterm's parser, but must not be reintroduced by hand-decoding input",
+        "write failures are swallowed (best-effort)",
+        "leaking mode 1004 on exit leaves the user's terminal emitting focus escapes \u2014 the guard must fire on panic too"
+      ]
+    },
+    {
+      "name": "TerminalGuard (setup + Drop teardown)",
+      "signature": "struct TerminalGuard; impl TerminalGuard { fn enter() -> io::Result<Self> } impl Drop for TerminalGuard",
+      "behavior": "Replaces curses.wrapper + the main() setup + atexit (sidebar.py:924-938, prototype:657-681). Enter: raw mode, alternate screen, mouse capture (immediate button-press reporting, i.e. mouseinterval 0), hide cursor, focus reporting on, allocate the base UI color pairs (green=1, cyan=2, yellow=3, red=4) and init_agent_colors. Drop: restore cooked mode, leave alt screen, disable mouse capture, disable focus reporting, show cursor.",
+      "side_effects": "Terminal mode changes; color-pair allocation.",
+      "edge_cases": [
+        "teardown must run on normal exit, self-exit, and panic (RAII, not inline-after-run like the prototype)",
+        "mouse must report button-down immediately (Python mouseinterval(0) + BUTTON1_PRESSED|CLICKED); crossterm MouseEventKind::Down(Left) is the equivalent"
+      ]
+    },
+    {
+      "name": "read_selection / write_selection",
+      "signature": "fn read_selection(state_dir: &Path) -> Option<Key> ; fn write_selection(state_dir: &Path, key: &Key)",
+      "behavior": "Cross-sidebar shared selection (sidebar.py:545-560). read: open selection file, strip trailing newline, split on TAB into fields; Some(key) only if there is a non-empty first field, else None; any I/O error -> None. write: mkdir -p the state dir, write the TAB-joined key fields; errors swallowed. The loop adopts read_selection on every poll and writes on every nav/click.",
+      "side_effects": "Reads/creates/writes the selection file under the state dir.",
+      "edge_cases": [
+        "empty file or empty first field -> None (adopt nothing; 'empty never matches')",
+        "key variants have 2-3 TAB fields: window ('w',id), pane ('p',id), agent ('a',id,pane), agent-window ('w',agent,id) \u2014 TAB is safe because tmux ids never contain a tab",
+        "adopting on every poll is how peer sidebars stay in sync; a local write is read back unchanged next poll",
+        "missing state dir tolerated on read"
+      ]
+    },
+    {
+      "name": "activate",
+      "signature": "fn activate(item: &Item)",
+      "behavior": "Focus the target of a selectable row (sidebar.py:804-806). Delegates to the tmux module's focus(window_id, optional pane_id): select-window then, if a pane is given, select-pane; when focusing a window whose active pane is a sidebar, land on the first real pane instead.",
+      "side_effects": "tmux select-window / select-pane.",
+      "edge_cases": [
+        "a window row has no pane -> focus resolves a real (non-sidebar) pane in that window",
+        "delegated logic lives in the tmux module; the client only supplies win.id and optional pane"
+      ]
+    },
+    {
+      "name": "width_sync (loop-resident state; delegates to width module)",
+      "signature": "fn width_sync(w: &mut WidthState, sidebar_pane: &str, me_panes: &Set, term_width: usize)",
+      "behavior": "The width state machine embedded in the poll (sidebar.py:1032-1072). The ALGORITHM belongs to the width module, but the client owns and threads its loop-resident state: floor(min_width), sync flag, last_width, pending_width, last_pane_set, relayout_grace. Distinguishes a user resize (clamp to floor, publish) from a tmux relayout (snap back to published/last width) from its own resize request (tracked via pending_width so its landing is not re-published).",
+      "side_effects": "tmux resize-pane; write_width.",
+      "edge_cases": [
+        "a pane-set change sets relayout_grace=2 (covers the resize tick and the following tick, which are unordered)",
+        "pending_width marks self-requested resizes so their landing is not mistaken for a user resize",
+        "on a relayout, restore = published width if >= floor else max(last_width, floor)",
+        "this is sticky cached state \u2014 the trickiest parity surface; enumerated here only to flag the client owns the mutable state that the width module reads/writes"
+      ]
+    }
+  ],
+  "depends_on": [
+    "tmux",
+    "rows",
+    "color",
+    "assoc",
+    "notify",
+    "width",
+    "proto",
+    "glue"
+  ],
+  "parity_risks": [],
+  "source_refs": [
+    "scripts/sidebar.py:835-898 (draw)",
+    "scripts/sidebar.py:808-815 (_fit)",
+    "scripts/sidebar.py:901-922 (mode 1004 / set_focus_reporting)",
+    "scripts/sidebar.py:924-938 (curses/main setup + atexit)",
+    "scripts/sidebar.py:950-972 (loop constants + state init)",
+    "scripts/sidebar.py:975-1008 (input handling: q/k/j/enter/mouse)",
+    "scripts/sidebar.py:1011-1030 (poll + self-exit conditions)",
+    "scripts/sidebar.py:1032-1072 (width sync state machine)",
+    "scripts/sidebar.py:1074-1094 (shared selection / notify / acknowledge / pane_status / cached)",
+    "scripts/sidebar.py:1096-1123 (rebuild gate + dirty/repaint)",
+    "scripts/sidebar.py:545-560 (read_selection / write_selection)",
+    "scripts/sidebar.py:789-806 (focus / activate)",
+    "prototype/src/main.rs:395-480 (build_rows structure the client consumes)",
+    "prototype/src/main.rs:498-549 (fit + render_line)",
+    "prototype/src/main.rs:558-606 (render + scroll/offset)",
+    "prototype/src/main.rs:621-682 (terminal setup/teardown)",
+    "prototype/src/main.rs:684-724 (run loop + input + focus events)",
+    "prototype/src/main.rs:744-761 (move_selection / activate_selected)"
+  ]
+}

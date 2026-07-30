@@ -1,0 +1,235 @@
+{
+  "module": "glue",
+  "pure": false,
+  "target_path": "src/glue/mod.rs (with submodules src/glue/install_hooks.rs and src/glue/tmux_cmd.rs)",
+  "depends_on": [
+    "tmux",
+    "width",
+    "hook",
+    "daemon"
+  ],
+  "source_refs": [
+    "scripts/install-hooks.py:37",
+    "scripts/install-hooks.py:42",
+    "scripts/install-hooks.py:54",
+    "scripts/install-hooks.py:64",
+    "scripts/install-hooks.py:82",
+    "scripts/install-hooks.py:86",
+    "scripts/install-hooks.py:141",
+    "scripts/install-hooks.py:172",
+    "scripts/install-hooks.py:175",
+    "scripts/hooks-manifest.json:1",
+    "wrangler.tmux:4",
+    "wrangler.tmux:19",
+    "wrangler.tmux:23",
+    "wrangler.tmux:28",
+    "wrangler.tmux:33",
+    "scripts/spawn.sh:11",
+    "scripts/spawn.sh:16",
+    "scripts/spawn.sh:18",
+    "scripts/spawn.sh:24",
+    "scripts/spawn.sh:28",
+    "scripts/spawn.sh:31",
+    "scripts/toggle.sh:7",
+    "scripts/toggle.sh:9",
+    "scripts/toggle.sh:16",
+    "scripts/toggle.sh:18",
+    "scripts/focus.sh:6",
+    "scripts/focus.sh:8"
+  ],
+  "functions": [
+    {
+      "name": "hook_command",
+      "signature": "fn hook_command(hook_path: &Path, agent: &str, action: &str) -> String",
+      "behavior": "Builds the shell command string a single hook runs: the shell-quoted absolute path to the agent-hook executable, then a space, agent, space, action. Python: `f\"{shlex.quote(HOOK)} {agent} {action}\"`. Only HOOK is quoted; agent/action are interpolated raw (they are trusted manifest tokens). HOOK itself is the realpath-resolved path to agent-hook.sh (in the Rust port, the resolved path/invocation of the hook subcommand, see `hook` module dep).",
+      "side_effects": "none (pure string build)",
+      "edge_cases": [
+        "Quoting MUST match Python shlex.quote exactly: return the string unquoted when it matches the safe set [A-Za-z0-9_@%+=:,./-]+, otherwise wrap in single quotes and replace each embedded single quote with the 4-char sequence '\\''. Empty string -> '' (two single quotes).",
+        "agent and action are NOT quoted; they contain only word chars in the manifest, but the port must interpolate them verbatim (a space in action would break parity, matching Python's current behavior).",
+        "HOOK is derived from realpath of the script dir + /agent-hook.sh; symlinks are resolved. Port must resolve the hook path the same stable way so the emitted command string is deterministic across runs."
+      ]
+    },
+    {
+      "name": "groups",
+      "signature": "fn groups(value: &EventValue) -> Vec<(Option<String>, Vec<String>)>",
+      "behavior": "Normalizes one manifest event value into a list of (optional matcher, actions) groups. Two accepted shapes: (a) a JSON array of action strings -> single group [(None, actions)]; (b) a JSON array of objects {matcher?, actions} -> one group per object, matcher = object.get('matcher') (None if absent). Detection is `value && isinstance(value[0], dict)`.",
+      "side_effects": "none",
+      "edge_cases": [
+        "Empty array value -> the `value && ...` guard is false, so returns [(None, [])] (a single no-matcher group with an empty action list). For the claude renderer this yields a group with an empty hooks array; the manifest never triggers this but the port must reproduce it, not skip it.",
+        "Object form with a missing 'actions' key is a hard error in Python (KeyError). Port should error (not default to empty) to preserve fail-loud parity.",
+        "Detection keys only on the first element's type; a mixed array (string then object) would be treated as string-form. Preserve.",
+        "matcher present but null in JSON is treated as None (no matcher emitted)."
+      ]
+    },
+    {
+      "name": "is_wrangler_command",
+      "signature": "fn is_wrangler_command(cmd: &str, agent: &str) -> bool",
+      "behavior": "Returns whether a hook command string belongs to this agent's wrangler hooks. Python uses `re.search(rf\"\\bagent-hook\\.sh\\b.*\\b{re.escape(agent)}\\b\", cmd)`: the literal token agent-hook.sh (word-bounded) followed by anything, followed by the word-bounded agent name. Used to identify wrangler's own groups for in-place replacement/upgrade regardless of the exact path form previously written (e.g. README's ~/.tmux/... path).",
+      "side_effects": "none",
+      "edge_cases": [
+        "Regex is deliberately loose (substring/word-boundary), NOT an exact command match, so entries written by an older release with a different absolute path are still recognised and upgraded in place. Do not tighten to an exact-string compare.",
+        "`.` in the regex is default (does not match newline); cmd is always a single line so this is moot, but keep single-line semantics.",
+        "agent must be regex-escaped before interpolation (re.escape). In the port, escape the agent literal or use a non-regex two-substring check that reproduces the word-boundary semantics.",
+        "Word boundaries matter: 'agent-hook.sh' must not match inside a longer token; keep \\b anchors. The literal `agent-hook.sh` in the Rust port must track whatever the hook binary/command is actually named (cross-module: `hook`)."
+      ]
+    },
+    {
+      "name": "atomic_write",
+      "signature": "fn atomic_write(path: &Path, text: &str, mode: u32) -> io::Result<()>",
+      "behavior": "Atomically replaces path's contents: makedirs(parent, exist_ok), create a temp file in the SAME directory (mkstemp), write text, chmod temp to `mode`, os.replace(temp, path) (atomic rename). On any error, unlink the temp file and re-raise.",
+      "side_effects": "Filesystem: creates parent dirs, writes+renames a temp file, sets file permissions. Leaves no temp file behind on failure.",
+      "edge_cases": [
+        "Temp file MUST be created in the same directory as the target so os.replace is a same-filesystem atomic rename (a cross-fs /tmp temp would fail EXDEV). Preserve.",
+        "chmod is applied to the temp file BEFORE the rename, so the final file lands with `mode` (umask does not apply to the final mode).",
+        "Cleanup swallows OSError on the temp unlink (best-effort). Reproduce: ignore errors when removing the temp on the failure path.",
+        "Parent directory creation uses exist_ok semantics (no error if it already exists)."
+      ]
+    },
+    {
+      "name": "dumps",
+      "signature": "fn dumps(data: &serde_json::Value) -> String",
+      "behavior": "Serializes a JSON value with `json.dumps(data, indent=2) + \"\\n\"`: 2-space indentation, a trailing newline appended, key order preserved as in the value.",
+      "side_effects": "none",
+      "edge_cases": [
+        "Python json.dumps defaults to ensure_ascii=True: all non-ASCII characters are emitted as \\uXXXX escapes. serde_json's pretty printer does NOT escape non-ASCII by default \u2014 the port MUST force ASCII escaping to match byte-for-byte, or config diffs will differ.",
+        "Exactly ONE trailing newline is appended (json.dumps itself emits none). No trailing whitespace on any line; indent is 2 spaces; item separator with indent is ',' and key separator ': '.",
+        "Key/object ordering follows insertion order \u2014 the port must use an order-preserving map (e.g. serde_json with preserve_order / IndexMap) so re-installs produce identical output and minimal diffs.",
+        "Empty object serializes as `{}` and empty array as `[]` (no inner spaces), matching Python."
+      ]
+    },
+    {
+      "name": "install_claude",
+      "signature": "fn install_claude(agent: &str, spec: &AgentSpec, hook_path: &Path, uninstall: bool) -> Result<()>",
+      "behavior": "Merges (install) or strips (uninstall) wrangler's hook groups inside a SHARED settings.json (default ~/.claude/settings.json, from spec.target, tilde-expanded). Reads existing JSON (or {} if missing/blank), takes data['hooks'] (or {} if absent/non-dict). For each (event, value) in spec.events: keeps existing groups for that event EXCEPT any group whose hooks contain a wrangler command (is_wrangler_command over each hook's 'command'); on install, appends wrangler's own groups built from groups(value): each group = {'hooks': [{'type':'command','command': hook_command(agent, action)} for action in actions]}, with {'matcher': m, ...} prepended when the group has a matcher. Empty kept -> remove the event key; empty hooks -> remove the 'hooks' key from data. Writes a .wrangler.bak backup of the pre-existing file, then atomic_write with dumps(data). Prints 'agent: Installed into <path>' / 'Uninstalled from <path>'.",
+      "side_effects": "Filesystem: reads target; if it exists, copies it to <target>.wrangler.bak (copy2, preserving metadata) EVERY run; atomically rewrites target. Stdout: one status line.",
+      "edge_cases": [
+        "Missing file OR blank/whitespace-only file -> data = {} (text.strip() falsy).",
+        "Top-level JSON not an object -> hard error `SystemExit(f'{path}: expected a JSON object at the top level')`. Preserve the fail-loud behavior and message shape.",
+        "data['hooks'] present but not a dict (e.g. a list) -> silently replaced with {}, discarding it. Preserve.",
+        "A user's existing group is dropped IN FULL if ANY hook inside it matches is_wrangler_command (mixed user+wrangler group would lose the user hooks). Preserve this all-or-nothing group filtering.",
+        "Wrangler groups are appended AFTER surviving user groups, in manifest groups() order; event iteration follows spec.events insertion order (JSON object order). Order must be preserved for idempotency.",
+        "claude group shape: actions of one manifest group collapse into a single group's 'hooks' array; matcher, when present, is the FIRST key ({'matcher':..., **group} => matcher before hooks). Preserve key order.",
+        "uninstall path still filters+rewrites and still writes the .wrangler.bak backup when the file exists; it just does not append. An uninstall on a file with no wrangler hooks still rewrites (potentially reordering via pop) and re-backs-up.",
+        "Backup is overwritten on every invocation while target exists (not one-time). Preserve.",
+        "File mode: existing target -> st_mode & 0o777 preserved; new target -> 0o600 (may hold secrets, private default).",
+        "After merge, if the whole hooks map is empty -> the 'hooks' key is removed from data (not left as {}).",
+        "Idempotent: install twice reproduces byte-identical output (relies on stable quoting + ordered JSON)."
+      ]
+    },
+    {
+      "name": "install_copilot",
+      "signature": "fn install_copilot(agent: &str, spec: &AgentSpec, hook_path: &Path, uninstall: bool) -> Result<()>",
+      "behavior": "Writes (install) or deletes (uninstall) a DEDICATED file wrangler owns outright (default ~/.copilot/hooks/wrangler.json, from spec.target). Uninstall: unlink the file; print 'Removed <path>' or, if absent, 'Nothing to remove at <path>'. Install: build doc = {'version': 1, 'hooks': {event: [ {'type':'command', matcher?, 'bash': hook_command(agent, action)} for (matcher, actions) in groups(value) for action in actions ] for (event, value) in spec.events}} and atomic_write dumps(doc). Print 'Installed into <path>'.",
+      "side_effects": "Filesystem: unlink (uninstall) or atomic rewrite (install). Stdout: one status line. No backup (owned file).",
+      "edge_cases": [
+        "copilot shape FLATTENS: unlike claude, every (matcher, action) pair becomes its OWN hook entry {type, matcher?, bash}; a group's actions are NOT nested under a shared 'hooks' array. Matcher is repeated on each flattened entry and included only when non-None. Preserve.",
+        "Key order within each entry: 'type', then optional 'matcher', then 'bash' ({'type':'command', **matcher_or_empty, 'bash':...}).",
+        "'bash' key (not 'command') carries the shell command for copilot; 'version': 1 wraps the doc.",
+        "Uninstall distinguishes FileNotFoundError to print 'Nothing to remove' vs 'Removed'. Preserve both messages.",
+        "File mode: existing file -> st_mode & 0o777 preserved; new file -> 0o644 (world-readable default, unlike claude's 0o600).",
+        "No .wrangler.bak backup is written for copilot (the file is wrangler-owned)."
+      ]
+    },
+    {
+      "name": "load_manifest",
+      "signature": "fn load_manifest(path: &Path) -> Result<Manifest>  // Manifest = ordered map<String, AgentSpec>; AgentSpec { target: String, format: String, events: OrderedMap<String, EventValue> }",
+      "behavior": "Loads scripts/hooks-manifest.json (path derived from the executable/script dir). Each top-level key is an agent name; each value has target, format ('claude'|'copilot'), and events (event-name -> EventValue, where EventValue is either [String] or [{matcher?, actions:[String]}]).",
+      "side_effects": "Filesystem read.",
+      "edge_cases": [
+        "Manifest key iteration order (agent order for the 'all' selector) and events insertion order MUST be preserved \u2014 use ordered deserialization.",
+        "EventValue is a union type; deserialize permissively (array-of-strings OR array-of-objects) and let groups() interpret it, mirroring the runtime shape detection rather than a rigid schema.",
+        "In the port the manifest may be embedded at compile time or shipped as a data file; either way the byte content and ordering must match scripts/hooks-manifest.json."
+      ]
+    },
+    {
+      "name": "install_hooks_main",
+      "signature": "fn install_hooks_main(argv: &[String], manifest_path: &Path, hook_path: &Path) -> i32",
+      "behavior": "CLI entry for the installer. Parses argv: '--uninstall' sets uninstall; '-h'/'--help' prints the module docstring and returns 0; one of 'all'|'claude'|'copilot' sets the selector (LAST such arg wins, default 'all'); any other arg prints 'unknown argument: <arg>' + docstring to stderr and returns 2. Loads the manifest. agents = all manifest keys (selector 'all') else [selector]. For each agent: look up spec; if absent print 'agent: not in manifest, skipping' to stderr and continue; else dispatch FORMATS[spec.format] (claude|copilot). Returns 0 on success.",
+      "side_effects": "Delegates to install_claude/install_copilot (filesystem writes, stdout); stderr for errors/skips.",
+      "edge_cases": [
+        "Selector precedence: later positional wins (e.g. `claude all` -> 'all'); flags and selector can be interleaved in any order.",
+        "Unknown positional arg -> exit code 2 with message + full docstring on stderr.",
+        "-h/--help short-circuits with exit 0 after printing the docstring (matches Python; help wins even if combined with other args since it returns immediately in the loop).",
+        "Selector naming an agent not in the manifest (only possible via 'claude'/'copilot' when the manifest lacks it) -> stderr 'not in manifest, skipping', continue, overall return 0.",
+        "spec.format not in FORMATS -> Python raises KeyError (unhandled crash). Port MUST decide: reproduce a hard error, or improve to a clean message; note this is currently an unguarded crash.",
+        "run backgrounded (see init) so a nonzero exit / crash on tmux load is invisible; keep failures non-fatal to plugin load."
+      ]
+    },
+    {
+      "name": "init",
+      "signature": "fn init(current_dir: &Path) -> Result<()>",
+      "behavior": "Port of wrangler.tmux (TPM entry point). Reads @wrangler-key (default 'Tab') and binds it (prefix table) to run the toggle command. Reads @wrangler-focus-key (default 'a') and binds it to run the focus command. If @wrangler-auto-install-hooks is on|1|yes|true, runs the installer BACKGROUNDED. Installs global hooks after-new-window and after-break-pane to run `spawn --if-active`. Unsets the legacy global hook session-window-changed. Patches automatic-rename-format: read it (-gv), and unless it already contains the substring '@wrangler_sidebar', wrap it as `#{?#{@wrangler_sidebar},#{window_name},<fmt>}` so focusing the sidebar pane does not rename the window to the sidebar's command.",
+      "side_effects": "Runs tmux: bind-key (x2), set-hook -g (x2), set-hook -gu (x1), set-option -g automatic-rename-format, and optionally spawns the backgrounded installer. Reads several @wrangler-* options.",
+      "edge_cases": [
+        "Key/focus-key/auto-install options read with `show-option -gqv` (quiet: empty when unset), then defaulted (Tab / a). automatic-rename-format read with `-gv` (NON-quiet).",
+        "auto-install-hooks truthy set is exactly {on,1,yes,true}; anything else (incl unset/empty) does not install.",
+        "Installer is launched with `run-shell -b` (backgrounded) so plugin load never blocks on config writes; idempotency makes firing every load harmless.",
+        "automatic-rename-format guard is a substring test on '@wrangler_sidebar' \u2014 do NOT double-wrap if already patched (idempotent across reloads).",
+        "If automatic-rename-format were unset the wrap would embed an empty fallback; in practice tmux always has a default so fmt is non-empty. Preserve the raw wrap regardless.",
+        "The legacy `set-hook -gu session-window-changed` cleanup must still be emitted (removes a hook installed by older releases).",
+        "The after-new-window / after-break-pane hook bodies invoke `spawn --if-active`; in bash they are single-quoted with $CURRENT_DIR interpolated (a path containing a single quote would break the hook \u2014 a latent quoting weakness to fix, not replicate, in the port).",
+        "Bindings are in the prefix key table (tmux `bind-key` default table), matching current behavior."
+      ]
+    },
+    {
+      "name": "spawn",
+      "signature": "fn spawn(win: Option<&str>, if_active: bool) -> Result<()>",
+      "behavior": "Port of spawn.sh: create one sidebar pane in a window unless it already has one. Resolves the target window id (given arg, else current `#{window_id}`). If if_active, first checks the whole SESSION for any existing sidebar pane (@wrangler_sidebar==1) and exits as a no-op if none (so auto-spawn only happens when the sidebar is toggled on). If the TARGET window already has a sidebar pane, exit no-op. Otherwise read @wrangler-width (default 32) and split a new left-hand, full-height, non-focused pane of that width running the sidebar/daemon; then tag the new pane with pane option @wrangler_sidebar 1.",
+      "side_effects": "Runs tmux: list-panes probes, split-window (launches the daemon process), set-option -p @wrangler_sidebar 1. Reads @wrangler-width. set -euo pipefail semantics: any tmux failure aborts.",
+      "edge_cases": [
+        "Sidebar detection is on the @wrangler_sidebar PANE OPTION equal to '1' (never the pane command). if-active/session check uses `list-panes -s` (session-wide); the target-window guard uses `list-panes -t win` (that window only).",
+        "Original uses `grep -q 1` on a single-field format (@wrangler_sidebar column is '1' or empty) \u2014 safe because the field is only ever 1/empty; the port should compare the field == \"1\" rather than a loose substring.",
+        "--if-active shifts the flag off argv, then an optional window id positional follows; port maps to (if_active flag, optional window arg).",
+        "Split flags: `-d` (don't switch to it), `-f` (full window height, not just the source pane), `-h` (horizontal split = side-by-side), `-b` (place BEFORE = left), `-l <width>` (size in columns). Reproduce all five semantics.",
+        "@wrangler-width is the CONFIGURED default column count (option), distinct from the runtime shared `width` STATE FILE managed by the width module. Default 32.",
+        "There is a race window between pane creation and tagging it @wrangler_sidebar 1 (the daemon's own dedup/self-exit handles a double-spawn); the tag is applied by pane id captured from split-window -P.",
+        "In the port, the split runs the daemon binary (replacing `python3 sidebar.py`); the command must live inside the pane and read $TMUX_PANE (see `daemon` dep)."
+      ]
+    },
+    {
+      "name": "toggle",
+      "signature": "fn toggle() -> Result<()>",
+      "behavior": "Port of toggle.sh: the on/off switch. Enumerate session-wide sidebar panes (`list-panes -s`, @wrangler_sidebar==1). If any exist, kill every one of them (ignoring per-pane kill errors) and return. Otherwise (turning on): delete the shared `width` STATE FILE, then for EVERY window in the session (`list-windows`) call spawn(window) with NO --if-active (unconditional spawn).",
+      "side_effects": "Runs tmux: list-panes, kill-pane (x N), list-windows, and spawn per window (which splits panes). Deletes the width state file under $XDG_STATE_HOME (default ~/.local/state)/tmux-agent-wrangler/width. set -euo pipefail.",
+      "edge_cases": [
+        "kill-pane errors are swallowed (`|| true`) to tolerate races (e.g. a pane already gone). Reproduce best-effort kill.",
+        "Turning on removes the width state file FIRST so a fresh toggle starts from the configured default width rather than a stale shared width; deletion is `rm -f` (missing file is fine). This is a cross-module touch of the `width` file \u2014 prefer routing through the width module.",
+        "Spawns via the unconditional spawn path (no if-active gate) \u2014 every window gets a sidebar regardless of current session sidebar state.",
+        "Sidebar set built with `list-panes -s -F '#{pane_id} #{@wrangler_sidebar}'` filtered by awk '$2==1'; the port should filter panes whose @wrangler_sidebar option is exactly '1'.",
+        "State-dir base: $XDG_STATE_HOME if set else $HOME/.local/state, then /tmux-agent-wrangler/width. Match the resolution used everywhere else."
+      ]
+    },
+    {
+      "name": "focus",
+      "signature": "fn focus() -> Result<()>",
+      "behavior": "Port of focus.sh: give keyboard focus to the CURRENT window's sidebar pane if it has one; no-op otherwise. Finds the first pane in the current window with @wrangler_sidebar==1, selects it, then sends C-l to that pane to force an immediate repaint (the blocking read would otherwise wait on the 1s poll before the focus highlight appears).",
+      "side_effects": "Runs tmux: list-panes (current window), select-pane, send-keys C-l. No-op (no writes) when the current window has no sidebar.",
+      "edge_cases": [
+        "Uses CURRENT-window `list-panes` (no -s), and takes the FIRST match only (awk '{print; exit}'). Contrast toggle/spawn which are session-wide. Preserve the current-window, first-match scope.",
+        "Never spawns a sidebar \u2014 a window without one is a pure no-op (this is why focus is separate from toggle).",
+        "The C-l nudge is load-bearing: select-pane delivers no input to the pane, so without it the highlight would lag until the next poll. The daemon treats C-l as a redraw trigger. Keep sending C-l after select-pane.",
+        "Detection again keys on the @wrangler_sidebar pane option == '1', not the pane command."
+      ]
+    }
+  ],
+  "parity_risks": [
+    "Shell quoting: hook_command must reproduce Python shlex.quote byte-for-byte (unquoted for the safe charset [A-Za-z0-9_@%+=:,./-], else single-quoted with each embedded ' rendered as '\\''; empty -> ''). Divergence changes emitted command strings and breaks install idempotency / clean upgrades.",
+    "JSON output parity: must preserve object key INSERTION order (ordered map), 2-space indent, ensure_ascii-style \\uXXXX escaping of all non-ASCII (serde_json does NOT do this by default), no trailing whitespace, and exactly one trailing newline. Any of these differing produces spurious config diffs.",
+    "claude vs copilot structural asymmetry: claude nests a group's actions under one 'hooks' array with an optional leading 'matcher' key; copilot FLATTENS to one {type, matcher?, bash} entry per action. Key ordering within each object is fixed and must be reproduced.",
+    "Group replacement invariant: on claude merge, a user's existing hook group is dropped ENTIRELY if any hook in it matches is_wrangler_command (loose \\bagent-hook\\.sh\\b.*\\b<agent>\\b regex, agent re-escaped). Wrangler groups are re-appended AFTER surviving user groups, in manifest order. This all-or-nothing filtering plus append order is the idempotency contract.",
+    "Sticky/side-effecting backup: install_claude rewrites <target>.wrangler.bak on EVERY run while the target exists (install and uninstall alike); copilot has no backup. Don't make it one-time.",
+    "File-mode rules differ by format and existence: preserve existing st_mode & 0o777; new claude file = 0o600, new copilot file = 0o644. atomic_write must chmod the temp before the same-directory rename (no umask leakage, no cross-fs temp).",
+    "Malformed-input handling: blank/whitespace/missing settings.json -> {}; non-object top level -> hard error; non-dict data['hooks'] -> silently dropped; empty event array -> a real empty group. Preserve each branch exactly (fail-loud where Python does).",
+    "groups() shape detection keys only on value[0] being a dict, and object form does g['actions'] (KeyError if missing) \u2014 reproduce the fail-on-missing-actions behavior rather than silently defaulting.",
+    "CLI arg parsing: last of all|claude|copilot wins; -h/--help returns 0 immediately; unknown arg -> stderr + exit 2; unknown spec.format currently KeyError-crashes (decide whether to reproduce or harden).",
+    "Manifest ordering: agent iteration order (the 'all' selector) and per-agent event order come from JSON insertion order and drive output order \u2014 must be order-preserving end to end.",
+    "@wrangler_sidebar pane option (== '1') is the SOLE source of truth for 'is this a sidebar' \u2014 never infer from the pane command anywhere (spawn/toggle/focus/init all rely on this).",
+    "Scope asymmetry across the three tmux commands: toggle and spawn-if-active probe SESSION-wide (-s); focus and spawn's target-window guard probe the CURRENT/target window only. Getting the scope wrong changes toggling/focus semantics.",
+    "tmux option read flags: keys/auto-install use -gqv (quiet, empty-when-unset then defaulted: Tab / a / off, width 32); automatic-rename-format uses -gv (non-quiet). Defaults must be applied in code, not assumed present.",
+    "automatic-rename-format patch is guarded by a substring check on '@wrangler_sidebar' and must stay idempotent (no double-wrapping across repeated plugin loads); and the legacy `set-hook -gu session-window-changed` cleanup must still be emitted.",
+    "toggle deletes the shared width state file before spawning (fresh start from configured default) \u2014 a cross-module write into `width` territory; route through the width module rather than duplicating the $XDG_STATE_HOME/tmux-agent-wrangler/width path.",
+    "focus's post-select C-l nudge and spawn's split flag set (-d -f -h -b -l) are behaviorally load-bearing; dropping the nudge lags the highlight to the poll, and changing split flags relocates/resizes the sidebar.",
+    "Backgrounded installer on load (run-shell -b) means installer failures are invisible and must remain non-fatal to plugin init; keep exit codes from install_hooks_main from aborting init.",
+    "hook path resolution: HOOK is realpath-resolved (symlinks followed) so the emitted command is stable; the port must resolve the hook subcommand/binary path deterministically (dep: hook), and the literal token 'agent-hook.sh' embedded in is_wrangler_command must match whatever the hook is actually invoked as while still recognising legacy installed entries."
+  ]
+}
