@@ -6,228 +6,212 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A tmux plugin (a TPM plugin) that renders a persistent sidebar listing the
 session's windows, their panes as a tree, and active AI-agent sessions
-(Claude Code, Copilot CLI, ...). Everything is bash glue plus one Python
-curses TUI. There is no build step, no dependency manager, and no test suite;
-the runtime dependencies are `tmux ≥ 3.1` and `python3` with stdlib `curses`.
+(Claude Code, Copilot CLI, ...). It is a single Rust binary, `wrangler`, that
+runs in several roles: an always-on daemon holding all state, a thin ratatui
+render client per sidebar pane, a hook client the agents invoke, and the
+tmux-facing glue commands. They coordinate over one Unix socket. The only
+runtime dependency is `tmux ≥ 3.1`.
+
+`wrangler.tmux` (the TPM entry point) obtains the binary in this order: an
+explicit `wrangler` on `PATH`, a local `target/` build that is not older than
+its sources, the prebuilt release binary for the checked-out commit
+(downloaded once and cached under `$XDG_CACHE_HOME/tmux-agent-wrangler`, only
+for a clean checkout), then a from-source `cargo build --release` run in the
+background. Whenever it produces a *new* binary (a build or a fresh download) it
+runs `tmux-entry --replace-daemon` so the new code replaces a daemon still
+running the old.
 
 ## Running / testing changes
 
-There is no test harness. Exercise changes inside a live tmux session:
-
 ```bash
-# Load the plugin into the running tmux server (re-run after editing wrangler.tmux)
-tmux run-shell "$PWD/wrangler.tmux"
-
-# Toggle the sidebar directly without going through the key binding
-scripts/toggle.sh
-
-# Spawn a sidebar in the current window only
-scripts/spawn.sh
+cargo test           # unit tests plus the golden parity fixtures
+cargo build --release
+cargo fmt
 ```
 
-The sidebar is `python3 scripts/sidebar.py`; it must run inside a tmux pane
-(it reads `$TMUX_PANE`). To see tracebacks, run tmux from a terminal so the
-pane's stderr is visible, or temporarily wrap the loop.
+Tests are self-contained: the daemon's tmux access goes through the `TmuxEnv`
+trait, so the poll pass and every handler are exercised against a `FakeTmux`
+with no live tmux and no real sockets. `spec/fixtures/*.json` are golden
+fixtures capturing the behaviour of the original Python implementation; the
+parity tests in `color`, `labels`, `daemon::rows`, and `daemon::assoc` assert
+against them, so treat a fixture mismatch as a regression rather than updating
+the fixture.
 
-State lives under `$XDG_STATE_HOME/tmux-agent-wrangler` (default
-`~/.local/state/tmux-agent-wrangler`): `sessions/` (agent registry, one file
-per session), `attention/` and `working/` (turn-state markers, one file per
-session that mirrors its `sessions/` filename), `notified/` (one flag per
-session id, the single-fire dedup for the bell/notification, see
-`notify_attention`), `selection` (shared highlighted row), and `width` (shared
-sidebar width). Deleting this directory resets all cross-pane state.
+**Never run the side-effecting subcommands against the live tmux server.**
+`tmux-entry`, `toggle`, `focus`, `spawn`, and `install-hooks` mutate real state:
+they rebind keys, set hooks, start/replace the daemon, and (when
+`@wrangler-auto-install-hooks` is on) rewrite the user's `~/.claude/settings.json`
+and `~/.copilot/hooks/wrangler.json`. Development happens inside tmux, so `$TMUX`
+is set and these do *not* no-op. To exercise a built binary safely, either run it
+with `env -u TMUX` (which takes the genuine outside-tmux no-op path) or point it
+at a throwaway tmux server on its own socket (`tmux -L test ...`).
+
+To try a change interactively, build it and reload the plugin from your own
+tmux (`prefix + I`, or `tmux source-file ~/.tmux.conf`), which re-runs
+`wrangler.tmux` and replaces the daemon.
 
 ## Architecture
 
 The core design constraint: **one sidebar pane per window**, not one shared
-sidebar pane. Switching windows in tmux would otherwise rearrange layouts.
-Each window's sidebar is an independent `sidebar.py` process; they coordinate
-only through files in the state dir, so most complexity is about keeping those
-independent instances behaving as one.
+sidebar pane. Switching windows in tmux would otherwise rearrange layouts. Each
+window's sidebar is an independent client process. They hold no state of their
+own: the daemon owns everything and pushes each client a ready-to-draw row
+model, which is what keeps the independent panes behaving as one sidebar.
 
-- **`wrangler.tmux`** — TPM entry point. Binds the toggle key (`@wrangler-key`,
-  default `Tab`, bound with prefix) and the focus key (`@wrangler-focus-key`,
-  default `a`, bound with prefix) and installs `after-new-window` /
-  `after-break-pane` hooks so windows created while the sidebar is on get their
-  own sidebar. Also patches `automatic-rename-format` so focusing the sidebar
-  pane (command `Python`) does not rename the window.
+A second constraint: the daemon is **multi-tenant**. One daemon serves every
+tmux server on the machine. The agent registry is global, but a session whose
+record carries a pane is scoped to the server that pane lives on, while a
+pane-less (daemon-hosted) session is title-matched on every server.
 
-- **`scripts/focus.sh`** — bound to the focus key. Selects the current window's
-  sidebar pane (found via the `@wrangler_sidebar` option); a no-op if the window
-  has no sidebar, so it never spawns one. After selecting, it sends `C-l` to the
-  sidebar to force an immediate repaint — the guaranteed path when a terminal or
-  config leaves `focus-events` off and the mode-1004 report never arrives.
+### Roles (`src/main.rs` dispatches on the subcommand)
 
-- **`scripts/toggle.sh`** — the on/off switch. If any sidebar pane exists, kills
-  all of them; otherwise clears the shared width and spawns one sidebar per
-  window. Sidebar panes are tagged with the pane option `@wrangler_sidebar 1`,
-  which is the single source of truth for "is this a sidebar" everywhere.
+- **`daemon`** (`src/daemon/`) — the always-on state owner. One process per
+  machine, enforced by the socket: `bind_singleton` binds, or connects to
+  disambiguate a live incumbent from a stale socket file. `--replace` evicts a
+  live incumbent instead of yielding, by reading the pid it recorded in
+  `daemon.pid`, signalling it, and waiting for the socket to free (kill, wait,
+  and bind happen in the one process, so there is no window where neither
+  daemon owns the socket). An incumbent that recorded no pid is left running
+  rather than orphaned.
 
-- **`scripts/spawn.sh`** — splits a left-hand sidebar pane into one window and
-  tags it. `--if-active` makes it a no-op unless the session already has
-  sidebars (used by the new-window hooks so sidebars only auto-spawn when
-  toggled on).
+- **`client`** (`src/client/mod.rs`) — the sidebar pane's renderer, spawned as
+  `wrangler client` in a split pane. It resolves its server/window/pane once at
+  startup, sends `Hello`, then draws whatever `Render` payloads arrive and
+  forwards input events. It reconnects if the daemon goes away, so a daemon
+  replacement is a blip rather than a dead sidebar.
 
-- **`scripts/sidebar.py`** — the TUI and all interactive logic. Polls tmux on a
-  1s timeout, redraws, and handles keys/mouse. Key responsibilities:
-  - **Self-exit conditions** (so tmux can close windows / avoid duplicate
-    sidebars): exits if its window has no real panes left, or if a
-    lower-numbered sidebar pane also occupies its window (a spawn race).
-  - **Focus reporting** (mode 1004): enables `ESC[?1004h` on start and disables
-    it on exit. The terminal's `ESC[I` / `ESC[O` focus reports arrive as an
-    unrecognised key code (curses assembles them into one code, or they fall
-    through as raw bytes); either way they wake the blocking `getch()`, so the
-    loop redraws and the focus-only selection highlight appears/clears the
-    instant focus changes rather than on the next poll. It deliberately does
-    *not* special-case a raw `ESC`: an arrow key arriving right after a focus
-    report can fragment into a bare `ESC` + `[` + letter, and swallowing it
-    would eat the keypress. tmux only delivers these reports when the user has
-    set `focus-events on` (the plugin does not set it); without it the highlight
-    falls back to the poll, and `focus.sh`'s `C-l` nudge always covers the focus
-    key.
-  - **Shared selection**: the highlighted row is written to / read from the
-    `selection` file every tick, so all sidebars highlight the same logical
-    row and Enter/click on any of them focuses the same target. An agent row's
-    selection key is `("a", session_id, pane)` — the pane is part of the key
-    because one session can be placed under several windows at once (see agent
-    association), and `main`'s nav/activate assume unique keys.
-  - **Agent association** (`fetch_agent_sessions`): a session's registry record
-    carries the pane captured at hook time, but that pane counts as a placement
-    only when the agent actually occupies it (`process_under`: the recorded pid
-    descends from the pane's top-level process `#{pane_pid}`, walking a `ps`
-    pid->ppid snapshot). A process launched from a tmux shell into a detached/GUI
-    host (a VSCode extension session, a disowned daemon) inherits `TMUX_PANE`
-    without living in that pane, and the id can later be freed for other use or,
-    across a server restart, reused, so an inherited id must not pin the session
-    to whatever now holds it (legacy 2-field records have no pid to verify and
-    are trusted for back-compat). Ancestry (not the controlling tty) is used so
-    the check needs no `/proc`, working on macOS as well as Linux.
-    A daemon-hosted (background) session records no pane at all — no `TMUX_PANE`
-    when its hook ran, and no process/env link back to a pane — so it is
-    associated by matching its title (`session_meta`) against each pane's live
-    title (`pane_titles` from `fetch_windows`, glyph-stripped by
-    `strip_status_prefix`): Claude Code sets the pane title to the session title
-    however the session is viewed (`claude attach`, `--resume`, or the agents
-    view), so a match means that pane is displaying the session. A session is
-    filed under the window of *every* pane showing it (recorded-if-occupied ∪
-    title-matched), so it can appear under two windows; one shown in no local
-    pane is dropped entirely (not listed detached) and reappears the instant a
-    pane shows it. Title collisions are broken by the recorded pane then the cwd,
-    and left unassigned if still ambiguous (better no jump than a wrong one);
-    empty titles never match.
-  - **Progress indicators** (`progress_indicator`): a single glyph/percentage
-    pinned to each row's right edge, from two independently-toggled sources.
-    `@wrangler-hook-progress` (default on) draws the hook turn state (an animated
-    spinner while working / `●` attention). `@wrangler-osc-progress` (default
-    off) draws an app's OSC 9;4 report as a state-colored percentage, read from
-    the `#{pane_pb_state}` / `#{pane_pb_progress}` pane vars in `fetch_windows`
-    (empty on a tmux too old to know them, so it degrades to a no-op). OSC wins
-    when a pane reports an active state (tmux 3.7 uses `hidden` for none, and
-    names OSC state 4 `paused`), else the hook glyph. Both render in
-    the window tree (per pane, keyed off `pane_progress` / `pane_status`) and
-    the agents section. `draw()` gives the indicator its own color pair (green/
-    yellow/red per state) so it stands out from the row's own color. The busy
-    glyph (hook `working`, OSC `indeterminate`) is a spinner (`spinner_frame`):
-    `main` loops on a fixed tick and advances a `frame` counter on the wall clock
-    (`ANIM_INTERVAL`) independent of the 1s data poll. `build_rows` runs only on a
-    poll or on a frame advance while a spinner is on screen — other ticks reuse
-    the built rows — and a redraw happens only when the tick is dirty (input, an
-    advanced frame while a spinner is on screen, or a changed poll snapshot), so
-    an idle sidebar loops at the tick rate but rebuilds and repaints no more than
-    the poll cadence.
-  - **Attention signals** (`notify_attention`): the bell (`@wrangler-bell`) and
-    the OSC desktop notification (`@wrangler-osc-notify`: `off` | `777`/`on` |
-    `9`) are raised here off the poll, not by the hook — reacting to the same
-    attention events before focus clears the `●` glyph. Pane focus does not gate
-    either signal because it says nothing about whether the terminal is visible.
-    This is what lets a daemon-hosted session signal at all: the hook has no pane
-    for it, but the sidebar resolves one via title matching. Because there is one
-    sidebar per window (and a session can sit under several windows), each
-    attention marker carries a monotonic event token and a locked
-    `notified/<id>` flag records the latest token, so exactly one sidebar signals
-    each event. The notification (built as `<window> · <label>`, OSC 777 also
-    carrying the agent name as its title) goes to each client tty of this tmux
-    session; the bell writes BEL to the matched pane's tty. With the sidebar off,
-    nothing signals.
-  - **Width sync** (`@wrangler-sync-width`, `@wrangler-min-width`): the
-    trickiest code. It distinguishes a *user* resize (clamp to the floor,
-    publish to the `width` file for other sidebars to adopt) from tmux
-    *relayout* width changes caused by panes appearing/disappearing (snap back
-    to the published/last width) from *its own* resize requests (tracked via
-    `pending_width` so their landing is not re-published as a user resize).
-    `relayout_grace` covers the two ticks around a pane-set change.
+- **`hook`** (`src/hook.rs`) — invoked by an agent's lifecycle hooks as
+  `wrangler hook <agent> <start|end|working|needsAttention|error>` with the hook
+  JSON on stdin (it parses both Claude Code snake_case and Copilot CLI
+  camelCase). It resolves the reporting server and pane from the environment and
+  sends one `HookEvent`. It starts the daemon if none is running.
 
-- **`scripts/agent-hook.sh`** — registers/unregisters an agent session in
-  `sessions/` and flags its turn state in `working/` and `attention/`. Called
-  from the agent's own lifecycle hooks as
-  `agent-hook.sh <agent> <start|end|working|needsAttention|error>` with the hook JSON
-  on stdin (parses both Claude Code snake_case and Copilot CLI camelCase). The
-  registry record is `pane<TAB>agent<TAB>pid<TAB>cwd<TAB>transcript`; it walks
-  the process ancestry to find the agent's PID so the sidebar can prune the
-  entry when the process dies, as a backstop for crashes that skip an end hook.
-  `working` (Claude Code's
-  `UserPromptSubmit` plus the resume signals `PostToolUse` / `PostToolUseFailure`
-  / `PostToolBatch` / `SubagentStart`; Copilot's `userPromptSubmitted`,
-  `postToolUse`, `postToolUseFailure`, subagent lifecycle actions, and the
-  background-completion/idle `notification` types) and
-  `needsAttention` (Claude Code's `Stop` / `StopFailure` / `PermissionRequest`,
-  the `idle_prompt` and `elicitation_dialog` `Notification` types, and a
-  `PreToolUse` matcher for the `AskUserQuestion` / `ExitPlanMode` interactive
-  tools; Copilot's `agentStop`, non-recoverable `errorOccurred`, and matched
-  `permission_prompt` / `elicitation_dialog` notifications) each write their
-  marker and delete the
-  other's, so the two are mutually exclusive. Copilot's `sessionStart` registers
-  the session and `sessionEnd` unregisters it. Every event (`start`, `working`,
-  `needsAttention`) self-registers the session first via `register_session` if
-  its registry record is missing, so a session whose `start` was missed — most
-  visibly a resumed Claude Code session, where SessionStart does not re-create
-  the entry — reappears the instant any later hook fires. `register_session` is
-  a no-op outside tmux (no `TMUX_PANE`), and the marker branches re-check the
-  record exists after ensuring registration, so an agent running outside a tmux
-  pane still leaves no orphan. The
-  sidebar renders an animated spinner for working and `●` for attention. It
-  signals each attention event before deleting the marker when its pane is
-  focused (the working marker persists until the turn ends). Recoverable Copilot
-  errors remain working. Copilot subagents
-  are not separately interactive sessions, so their lifecycle events only keep
-  the parent working and never create their own sidebar rows. `sidebar.py`
-  prunes any registry entry (and both markers)
-  whose pane is gone or whose PID is dead. The hook does *not* fire the bell or
-  the desktop notification: it only writes the attention marker. The sidebar
-  reacts to that marker (see `notify_attention` in the `sidebar.py` bullet),
-  because it, not the hook, can locate the pane displaying a daemon-hosted
-  session.
+- **the glue** (`src/glue/mod.rs`) — `tmux-entry` runs at plugin load: it binds
+  the toggle/focus keys, installs the `after-new-window` / `after-break-pane`
+  spawn hooks, patches `automatic-rename-format` so focusing a sidebar pane does
+  not rename the window, optionally installs the agent hooks, and starts the
+  daemon. `toggle`, `focus`, and `spawn` are bound to keys and hooks and drive
+  the sidebar panes through server-side tmux operations, so they work even
+  before the daemon is up.
 
-- **`scripts/session_labels.py`** — `sidebar.py`'s agent-row label logic, kept in
-  its own module so the transcript-scanning stays isolated and testable. Holds
-  `session_meta` (reads Claude's session title / teammate `@name` / `/color`
-  from the transcript tail, or Copilot's live `name` / `summary` from
-  `~/.copilot/session-state/<id>/workspace.yaml`), `agent_label` (composes the
-  row text from mode/title/agent/dir), and `label_mode_from` (the
-  `@wrangler-label` `dir`-else-`name` rule). Stdlib-only (json/os), no curses,
-  no `TMUX_PANE`.
+### The daemon core
 
-- **`scripts/install-hooks.py`** — installs (or `--uninstall`s) the
-  `agent-hook.sh` invocations into each agent's config so users need not hand-edit
-  them. It renders `scripts/hooks-manifest.json` — the declarative per-agent list
-  of `event -> [action]` mappings — wiring the absolute path to this repo's
-  `agent-hook.sh`. An event value is either a list of action strings (one hook
-  group, no matcher) or a list of `{matcher, actions}` objects (one group each);
-  each format emits matchers in its agent-specific config shape. Two `format`s:
-  `claude` merges non-destructively into the
-  shared `~/.claude/settings.json` (replacing only wrangler's own hook groups,
-  keyed on the `agent-hook.sh` command, preserving mode and a `.wrangler.bak`
-  backup); `copilot` writes the dedicated `~/.copilot/hooks/wrangler.json` it
-  owns outright. Idempotent. `wrangler.tmux` runs it on load when
-  `@wrangler-auto-install-hooks` is on. Adding an agent event is one line in the
-  manifest; a new agent whose config differs needs a new `format` handler.
+`src/daemon/mod.rs` runs a **single-owner core loop**: all state lives in one
+`State`, fed by one mpsc channel and processed serially. Each connection gets a
+reader thread that forwards decoded lines as an `Event`; a timer thread emits
+`Event::Poll` every second. Nothing else touches the state, so there are no
+locks around it. This is std threads and `std::sync::mpsc`, not an async
+runtime; the concurrency model is the same either way.
+
+- **`state.rs`** — the authoritative state and every handler (`on_hello`,
+  `on_input`, `on_hook`, `on_disconnect`, `poll_server`). All tmux, `ps`, and
+  tty access goes through the **`TmuxEnv` trait**, which is the seam that makes
+  the whole thing testable; `RealTmux` implements it over `src/tmux.rs`.
+  Per-server state (`ServerState`) holds the shared selection and width.
+
+- **`assoc.rs`** — which panes and windows are displaying a session. A record's
+  recorded pane counts as a placement only when the agent actually occupies it
+  (the recorded pid descends from the pane's `#{pane_pid}`, checked against a
+  `ps` pid->ppid snapshot). A process launched from a tmux shell into a
+  detached/GUI host inherits `TMUX_PANE` without living in that pane, and pane
+  ids are reused, so an inherited id must not pin a session to whatever now
+  holds it. Ancestry rather than the controlling tty keeps this working on
+  macOS as well as Linux. A daemon-hosted session records no pane at all and is
+  matched instead by its title against each pane's live title: Claude Code sets
+  the pane title to the session title however the session is viewed, so a match
+  means that pane is displaying it. A session is filed under the window of
+  *every* pane showing it, so it can appear under two windows; one shown in no
+  pane is dropped entirely. Title collisions are broken by the recorded pane
+  then the cwd, and left unassigned if still ambiguous (better no jump than a
+  wrong one). Legacy 2-field registry records have no pid to verify and are
+  trusted for back-compat: preserve that when touching the record format.
+
+- **`rows.rs`** — builds the flat, semantic row list (window tree plus agent
+  sections) with each row's progress indicator resolved. Two independently
+  toggled indicator sources: `@wrangler-hook-progress` (default on) draws the
+  hook turn state (an animated spinner while working, `●` for attention) and
+  `@wrangler-osc-progress` (default off) draws a pane's OSC 9;4 report as a
+  state-colored percentage, read from `#{pane_pb_state}` / `#{pane_pb_progress}`
+  (empty on a tmux too old to know them, so it degrades to a no-op). OSC wins
+  when a pane reports an active state, else the hook glyph.
+
+- **`notify.rs`** — the bell (`@wrangler-bell`) and the desktop notification
+  (`@wrangler-osc-notify`). Raised by the daemon off the poll, not by the hook,
+  because the daemon is what can locate the pane displaying a daemon-hosted
+  session. Each attention marker carries a monotonic event token and the
+  notifier records the latest token per session, so an event signals exactly
+  once. Pane focus does not gate either signal: it says nothing about whether
+  the terminal is visible. The `●` still clears when the pane is focused.
+
+- **`persist.rs`** — the registry snapshot, one file per session under
+  `sessions/` in the state dir (`$XDG_STATE_HOME/tmux-agent-wrangler`, default
+  `~/.local/state/...`). This is the daemon's only on-disk state; turn markers,
+  selection, and width live in memory. The socket (`daemon.sock`) and pidfile
+  (`daemon.pid`) sit alongside it.
+
+### The wire protocol (`src/proto.rs`)
+
+Newline-delimited JSON. Inbound messages arrive as an untagged `Inbound`
+envelope resolved by disjoint `type` tags into `Client`, `Hook`, or `Ctl`;
+outbound the daemon pushes `Render` (the row model), `Width`, and `Exit`.
+Selection is carried as an **absolute** row key, never a relative movement, so
+clients cannot drift out of sync.
+
+### Width sync (`@wrangler-sync-width`, `@wrangler-min-width`)
+
+Owned by the client, and shaped around the fact that only one sidebar is
+resized at a time in practice. A *user* resize (tmux resized the pane) is
+clamped to the minimum width and published to the daemon, which relays a
+`Width` message to the other clients on that server; they adopt it. A resize the
+client asked for itself is swallowed via a recorded `pending` width, so an
+adopted width never echoes back as a new user resize. The result is one "lead"
+client with the others following.
+
+### Sidebar lifecycle
+
+A sidebar must never be alone in a window (it would expand to full width and
+keep an empty window alive). The daemon pushes `ServerMsg::Exit` when a client's
+window has no real panes left: immediately on the resize that the closing pane
+triggers, and again from the poll as a backstop. That resize is deliberately
+*not* relayed as a width update, or the closing sidebar would drag every other
+sidebar wide before it exits. Clients also self-exit on a spawn race, when a
+lower-numbered sidebar pane occupies the same window.
+
+The ~1s worst case on the poll backstop is inherent to polling; control-mode
+push would remove it.
+
+### Hook installation (`src/glue/install.rs`)
+
+Installs (or `--uninstall`s) the `wrangler hook` invocations into each agent's
+config so users need not hand-edit them. It renders
+`scripts/hooks-manifest.json` — the declarative per-agent `event -> [action]`
+map, embedded at compile time with `include_str!`. An event value is either a
+list of action strings (one hook group, no matcher) or a list of
+`{matcher, actions}` objects (one group each). Two formats: `claude` merges
+non-destructively into the shared `~/.claude/settings.json` (replacing only
+wrangler's own hook groups, keyed on the hook command, preserving a
+`.wrangler.bak` backup); `copilot` writes the dedicated
+`~/.copilot/hooks/wrangler.json` it owns outright. A command written by an older
+release (the legacy `agent-hook.sh` script) is recognised so it is upgraded
+rather than duplicated. Idempotent. Adding an agent event is one line in the
+manifest; a new agent whose config differs needs a new format handler.
+
+### Release binaries
+
+`.github/workflows/build-binaries.yml` builds on every push to a tracked branch
+(TPM updates a plugin by pulling it, so each commit needs matching binaries) and
+publishes a prerelease **named the commit's 7-character short SHA** carrying
+`wrangler-linux-x64` (musl, static) and `wrangler-macos-arm64`. `wrangler.tmux`
+derives that same short SHA from its checkout to fetch the right assets, and the
+owner/repo from the `origin` remote so a fork fetches its own releases. Keep the
+asset names and the short-SHA release name in step with the wrapper.
 
 ## Conventions
 
 - The `@wrangler_sidebar` pane option marks sidebar panes; check it (never the
   pane command) to tell sidebars from real panes.
-- `sidebar.py` reads legacy 2-field registry records (old `claude-hook.sh`
-  format: `pane<TAB>cwd`) as well as the current 4-field format — preserve that
-  backward compatibility when touching the registry format.
 - User-facing tmux options are all prefixed `@wrangler-`; document new ones in
   the README's Options section.
+- Prefer types that make invalid states unrepresentable over runtime checks: the
+  domain vocabulary in `src/model.rs` (`ServerKey`, `SessionKey`, `RowKey`, ...)
+  exists so the daemon, client, and protocol cannot confuse one id for another.

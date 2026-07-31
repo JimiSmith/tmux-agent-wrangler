@@ -35,7 +35,11 @@ sidebar that follows you.
 ## Requirements
 
 - tmux ≥ 3.1
-- python3 (with the standard-library `curses` module — present on macOS and most Linux distros)
+
+The plugin is a single Rust binary. On first load it downloads the prebuilt
+binary for your platform (Linux x64, macOS arm64) matching the commit you have
+checked out; on any other platform, or if the download is unavailable, it builds
+from source with `cargo` in the background instead. Nothing else to install.
 
 ## Install
 
@@ -86,9 +90,9 @@ permission prompt). Wire as many of each family as your agent fires; more
 coverage just means the state flips sooner.
 
 Sessions register in `$XDG_STATE_HOME/tmux-agent-wrangler/sessions` (default
-`~/.local/state/...`) via `scripts/agent-hook.sh`.
-The start hook records the pane, cwd, and the agent's PID; the sidebar prunes
-an entry when its pane disappears or its process exits.
+`~/.local/state/...`) via `wrangler hook`, which the agents call from the
+lifecycle hooks wired below. The start hook records the pane, cwd, and the
+agent's PID; an entry is pruned when its pane disappears or its process exits.
 
 Session names update live. Claude titles come from its transcript; Copilot
 titles come from `~/.copilot/session-state/<session-id>/workspace.yaml`
@@ -96,29 +100,35 @@ titles come from `~/.copilot/session-state/<session-id>/workspace.yaml`
 
 ### Automatic install
 
-Rather than editing the config files by hand (below), run the installer, which
-wires the hooks for both agents using this plugin's own path:
+The simplest route is to let the plugin wire the hooks itself on load:
+
+```tmux
+set -g @wrangler-auto-install-hooks on
+```
+
+Or run the installer yourself, which wires both agents to the running binary's
+own path:
 
 ```sh
-scripts/install-hooks.py            # both agents
-scripts/install-hooks.py claude     # or one: claude | copilot
-scripts/install-hooks.py --uninstall
+wrangler install-hooks             # both agents
+wrangler install-hooks claude      # or one: claude | copilot
+wrangler install-hooks --uninstall
 ```
 
 It merges into Claude Code's shared `~/.claude/settings.json` without touching
 your other hooks (backing it up to `settings.json.wrangler.bak` first) and
 writes Copilot's dedicated `~/.copilot/hooks/wrangler.json`. It is idempotent,
-so re-running is safe. The hook set it installs lives in
-`scripts/hooks-manifest.json`. To run it automatically on plugin load, set
-`@wrangler-auto-install-hooks on` (see Options).
+so re-running is safe, and re-running it after an update re-points the hooks at
+the new binary.
 
-To wire the hooks manually instead, use the per-agent blocks below.
-
-The examples below assume the default TPM install path,
-`~/.tmux/plugins/tmux-agent-wrangler`. To confirm where TPM put the plugin,
-run `tmux show-environment -g TMUX_PLUGIN_MANAGER_PATH` — the plugin lives in
-a `tmux-agent-wrangler` directory under that path. If you installed manually,
-use the directory you cloned instead.
+To wire the hooks manually instead, use the per-agent blocks below, replacing
+`/path/to/wrangler` with your binary. The plugin resolves it in this order: a
+`wrangler` on your `PATH`, then `target/release/wrangler` under the plugin
+directory, then the downloaded copy in
+`$XDG_CACHE_HOME/tmux-agent-wrangler` (default `~/.cache/...`). To find where
+TPM put the plugin, run
+`tmux show-environment -g TMUX_PLUGIN_MANAGER_PATH` — it lives in a
+`tmux-agent-wrangler` directory under that path.
 
 ### Claude Code
 
@@ -134,41 +144,41 @@ attention-worthy `Notification` types:
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude start" }] }
+      { "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude start" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude end" }] }
+      { "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude end" }] }
     ],
     "UserPromptSubmit": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
+      { "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude working" }] }
     ],
     "PostToolUse": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
+      { "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude working" }] }
     ],
     "PostToolUseFailure": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
+      { "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude working" }] }
     ],
     "PostToolBatch": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
+      { "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude working" }] }
     ],
     "SubagentStart": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude working" }] }
+      { "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude working" }] }
     ],
     "PreToolUse": [
-      { "matcher": "AskUserQuestion|ExitPlanMode", "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
+      { "matcher": "AskUserQuestion|ExitPlanMode", "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude needsAttention" }] }
     ],
     "Stop": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
+      { "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude needsAttention" }] }
     ],
     "StopFailure": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
+      { "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude needsAttention" }] }
     ],
     "PermissionRequest": [
-      { "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
+      { "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude needsAttention" }] }
     ],
     "Notification": [
-      { "matcher": "idle_prompt", "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] },
-      { "matcher": "elicitation_dialog", "hooks": [{ "type": "command", "command": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh claude needsAttention" }] }
+      { "matcher": "idle_prompt", "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude needsAttention" }] },
+      { "matcher": "elicitation_dialog", "hooks": [{ "type": "command", "command": "/path/to/wrangler hook claude needsAttention" }] }
     ]
   }
 }
@@ -183,43 +193,43 @@ Create `~/.copilot/hooks/wrangler.json`:
   "version": 1,
   "hooks": {
     "sessionStart": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot start" }
+      { "type": "command", "bash": "/path/to/wrangler hook copilot start" }
     ],
     "userPromptSubmitted": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+      { "type": "command", "bash": "/path/to/wrangler hook copilot working" }
     ],
     "postToolUse": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+      { "type": "command", "bash": "/path/to/wrangler hook copilot working" }
     ],
     "postToolUseFailure": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+      { "type": "command", "bash": "/path/to/wrangler hook copilot working" }
     ],
     "subagentStart": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+      { "type": "command", "bash": "/path/to/wrangler hook copilot working" }
     ],
     "subagentStop": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working" }
+      { "type": "command", "bash": "/path/to/wrangler hook copilot working" }
     ],
     "agentStop": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention" }
+      { "type": "command", "bash": "/path/to/wrangler hook copilot needsAttention" }
     ],
     "errorOccurred": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot error" }
+      { "type": "command", "bash": "/path/to/wrangler hook copilot error" }
     ],
     "notification": [
       {
         "type": "command",
         "matcher": "shell_completed|shell_detached_completed|agent_completed|agent_idle",
-        "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot working"
+        "bash": "/path/to/wrangler hook copilot working"
       },
       {
         "type": "command",
         "matcher": "permission_prompt|elicitation_dialog",
-        "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot needsAttention"
+        "bash": "/path/to/wrangler hook copilot needsAttention"
       }
     ],
     "sessionEnd": [
-      { "type": "command", "bash": "~/.tmux/plugins/tmux-agent-wrangler/scripts/agent-hook.sh copilot end" }
+      { "type": "command", "bash": "/path/to/wrangler hook copilot end" }
     ]
   }
 }
@@ -308,10 +318,11 @@ not understand the chosen one silently ignores it. Either way `<window>` /
 `vim · api-service`), and the escape is sent to the terminal itself rather than
 through tmux, so the notification arrives whatever window you are on.
 
-Both signals are raised by the sidebar as it polls, so they need the sidebar
-toggled on. They fire for every attention event regardless of which pane is
-focused: pane focus says nothing about whether the terminal itself is visible.
-The `●` indicator still clears when you focus the agent's pane.
+Both signals are raised by the background daemon the moment an agent reports
+attention, so they reach you whether or not the sidebar is showing. They fire
+for every attention event regardless of which pane is focused: pane focus says
+nothing about whether the terminal itself is visible. The `●` indicator still
+clears when you focus the agent's pane.
 
 For the selection highlight to follow focus the moment it changes rather than
 on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:
