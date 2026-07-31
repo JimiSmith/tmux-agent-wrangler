@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::os::unix::net::UnixStream;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -233,17 +233,14 @@ fn try_send(msg: &HookMsg) -> std::io::Result<()> {
     write_message(&mut stream, msg)
 }
 
-/// Spawn a background process running this executable's `daemon` subcommand,
-/// detached from this process's standard streams and not waited on. Any spawn
-/// failure is swallowed.
+/// Spawn this executable's `daemon` subcommand, fully detached so it outlives the
+/// tmux server that triggered this hook, and not waited on. Any spawn failure is
+/// swallowed.
 fn spawn_daemon() {
     if let Ok(exe) = std::env::current_exe() {
-        let _ = Command::new(exe)
-            .arg("daemon")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+        let mut command = Command::new(exe);
+        command.arg("daemon");
+        crate::platform::spawn_detached(command);
     }
 }
 

@@ -1,6 +1,226 @@
-//! The always-on, multi-tenant daemon. Its socket server and event loop are
-//! added in the integration phase; the pure model-building modules live here.
+//! The always-on, multi-tenant daemon: a single-owner core that holds all state,
+//! fed by one channel from the socket readers and a poll timer.
+//!
+//! A connection's reader thread forwards each decoded line as an [`Event`]; a
+//! timer thread emits [`Event::Poll`] once a second. The core loop owns [`State`]
+//! and the client write handles, processes events serially, and writes each
+//! resulting push back to its connection. The model-building modules it drives
+//! stay pure and testable.
 
 pub mod assoc;
 pub mod notify;
+pub mod persist;
 pub mod rows;
+pub mod state;
+
+use std::io::BufReader;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::process::ExitCode;
+use std::sync::mpsc::{self, Sender};
+use std::thread;
+use std::time::Duration;
+
+use indexmap::IndexMap;
+
+use crate::daemon::state::{ConnId, RealTmux, State, TmuxEnv};
+use crate::model::ServerKey;
+use crate::paths::{daemon_socket, state_dir};
+use crate::proto::{read_message, write_message, ClientMsg, CtlMsg, HookMsg, Inbound, ServerMsg};
+
+/// The interval between full tmux polls.
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// An input to the core loop. Every socket line, connection lifecycle change, and
+/// timer tick reaches the core as one of these.
+enum Event {
+    Connected { conn: ConnId, writer: UnixStream },
+    Inbound { conn: ConnId, msg: Inbound },
+    Disconnected { conn: ConnId },
+    Poll,
+}
+
+/// The result of trying to become the singleton daemon.
+enum Bind {
+    Listener(UnixListener),
+    AlreadyRunning,
+    Failed,
+}
+
+/// Bind the daemon socket, or determine that another daemon already owns it. An
+/// `AddrInUse` error is disambiguated by connecting: a successful connect means a
+/// live daemon (yield to it); a refused one means a stale socket file, which is
+/// removed and rebound.
+fn bind_singleton(path: &std::path::Path) -> Bind {
+    match UnixListener::bind(path) {
+        Ok(l) => Bind::Listener(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            if UnixStream::connect(path).is_ok() {
+                return Bind::AlreadyRunning;
+            }
+            let _ = std::fs::remove_file(path);
+            match UnixListener::bind(path) {
+                Ok(l) => Bind::Listener(l),
+                Err(_) => Bind::Failed,
+            }
+        }
+        Err(_) => Bind::Failed,
+    }
+}
+
+/// Accept connections forever, assigning each an id in accept order. A write
+/// handle is cloned for the core to push through, and a reader thread forwards
+/// that connection's lines.
+fn spawn_acceptor(listener: UnixListener, tx: Sender<Event>) {
+    thread::spawn(move || {
+        let mut next: u64 = 0;
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let conn = ConnId(next);
+            next += 1;
+            let Ok(writer) = stream.try_clone() else {
+                continue;
+            };
+            if tx.send(Event::Connected { conn, writer }).is_err() {
+                return;
+            }
+            let reader_tx = tx.clone();
+            thread::spawn(move || reader_loop(conn, stream, reader_tx));
+        }
+    });
+}
+
+/// Forward one connection's decoded lines to the core until end of stream or a
+/// decode error, then report the disconnect.
+fn reader_loop(conn: ConnId, stream: UnixStream, tx: Sender<Event>) {
+    let mut reader = BufReader::new(stream);
+    loop {
+        match read_message::<_, Inbound>(&mut reader) {
+            Ok(Some(msg)) => {
+                if tx.send(Event::Inbound { conn, msg }).is_err() {
+                    return;
+                }
+            }
+            _ => {
+                let _ = tx.send(Event::Disconnected { conn });
+                return;
+            }
+        }
+    }
+}
+
+/// Emit a poll tick every interval until the core stops receiving.
+fn spawn_poller(tx: Sender<Event>) {
+    thread::spawn(move || loop {
+        thread::sleep(POLL_INTERVAL);
+        if tx.send(Event::Poll).is_err() {
+            return;
+        }
+    });
+}
+
+/// The single-owner core: own the state and the write handles, and process events
+/// serially, writing each push to its connection.
+fn core_loop(rx: mpsc::Receiver<Event>) {
+    let env = RealTmux;
+    let mut state = State::new();
+    state.load_records(persist::load());
+    let mut writers: IndexMap<ConnId, UnixStream> = IndexMap::new();
+
+    while let Ok(ev) = rx.recv() {
+        let mut pushes: Vec<(ConnId, ServerMsg)> = Vec::new();
+        match ev {
+            Event::Connected { conn, writer } => {
+                writers.insert(conn, writer);
+            }
+            Event::Disconnected { conn } => {
+                writers.shift_remove(&conn);
+                state.on_disconnect(conn);
+            }
+            Event::Poll => {
+                let parents = env.ppid_map();
+                let servers: Vec<ServerKey> = state.servers.keys().cloned().collect();
+                for server in servers {
+                    state.poll_server(&env, &server, &parents, &mut pushes);
+                }
+                let keys = state.registry_keys();
+                state.notifier.retain_live(&keys);
+                if state.dirty_registry {
+                    persist::save(&state.registry);
+                    state.dirty_registry = false;
+                }
+            }
+            Event::Inbound { conn, msg } => match msg {
+                Inbound::Client(ClientMsg::Hello {
+                    server,
+                    window,
+                    pane,
+                    cols,
+                    ..
+                }) => {
+                    pushes = state.on_hello(&env, conn, server, window, pane, cols);
+                }
+                Inbound::Client(ClientMsg::Input { event }) => {
+                    pushes = state.on_input(&env, conn, event);
+                }
+                Inbound::Client(ClientMsg::Bye) => {
+                    writers.shift_remove(&conn);
+                    state.on_disconnect(conn);
+                }
+                Inbound::Hook(HookMsg::HookEvent {
+                    server,
+                    pane,
+                    agent,
+                    event,
+                    session_id,
+                    cwd,
+                    transcript,
+                    pid,
+                    token,
+                    ..
+                }) => {
+                    let servers = state.on_hook(
+                        server, pane, agent, event, session_id, cwd, transcript, pid, token,
+                    );
+                    if !servers.is_empty() {
+                        let parents = env.ppid_map();
+                        for server in servers {
+                            state.poll_server(&env, &server, &parents, &mut pushes);
+                        }
+                    }
+                }
+                Inbound::Ctl(CtlMsg::Toggle { server }) => env.toggle(&server.0),
+                Inbound::Ctl(CtlMsg::Focus { server, .. }) => env.focus_key(&server.0),
+            },
+        }
+
+        for (conn, msg) in pushes {
+            if let Some(writer) = writers.get_mut(&conn) {
+                if write_message(writer, &msg).is_err() {
+                    writers.shift_remove(&conn);
+                }
+            }
+        }
+    }
+}
+
+/// The daemon entry point: become the singleton, then serve until killed. Exits 0
+/// when another daemon already owns the socket (the always-on invariant is
+/// already met).
+pub fn run() -> ExitCode {
+    let socket = daemon_socket();
+    let _ = std::fs::create_dir_all(state_dir());
+
+    let listener = match bind_singleton(&socket) {
+        Bind::Listener(l) => l,
+        Bind::AlreadyRunning => return ExitCode::SUCCESS,
+        Bind::Failed => return ExitCode::from(1),
+    };
+
+    let (tx, rx) = mpsc::channel::<Event>();
+    spawn_acceptor(listener, tx.clone());
+    spawn_poller(tx);
+    core_loop(rx);
+
+    let _ = std::fs::remove_file(&socket);
+    ExitCode::SUCCESS
+}

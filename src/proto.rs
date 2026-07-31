@@ -72,11 +72,14 @@ pub enum ClientMsg {
 }
 
 /// A message the daemon pushes back to a sidebar client. `Render` carries the
-/// per-window row model the client paints.
+/// per-window row model the client paints; `Width` carries the shared column
+/// width another of the server's sidebars was resized to, for this client to
+/// adopt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
     Render(RowModel),
+    Width { cols: u16 },
 }
 
 /// A message an agent lifecycle hook sends inward. `server` and `pane` are absent
@@ -127,6 +130,18 @@ mod i128_str {
 pub enum CtlMsg {
     Toggle { server: ServerKey },
     Focus { server: ServerKey, window: WindowId },
+}
+
+/// Any message a connection may send inward, decoded without knowing the sender's
+/// role up front. The three inner enums tag on disjoint `type` values (client:
+/// `hello`/`input`/`bye`; hook: `hook_event`; ctl: `toggle`/`focus`), so an
+/// untagged decode resolves each line to exactly one variant.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum Inbound {
+    Client(ClientMsg),
+    Hook(HookMsg),
+    Ctl(CtlMsg),
 }
 
 /// Serialize one message as a single JSON line and write it, followed by exactly
@@ -263,6 +278,53 @@ mod tests {
     #[test]
     fn server_render_round_trips() {
         round_trip(&ServerMsg::Render(sample_row_model()));
+    }
+
+    #[test]
+    fn server_width_round_trips() {
+        round_trip(&ServerMsg::Width { cols: 28 });
+    }
+
+    /// A line written as each concrete inbound message decodes back to the
+    /// matching `Inbound` variant, so the daemon can read any sender's line off
+    /// one socket without knowing its role first.
+    #[test]
+    fn inbound_resolves_each_sender_role() {
+        let client = ClientMsg::Hello {
+            server: ServerKey("/s".into()),
+            window: WindowId("@1".into()),
+            pane: PaneId("%1".into()),
+            cols: 30,
+            rows: 40,
+        };
+        let hook = HookMsg::HookEvent {
+            server: Some(ServerKey("/s".into())),
+            pane: Some(PaneId("%1".into())),
+            agent: "claude".into(),
+            event: HookAction::Working,
+            session_id: "abc".into(),
+            cwd: "/c".into(),
+            transcript: "/t".into(),
+            recoverable: None,
+            pid: Some(7),
+            token: 42i128,
+        };
+        let ctl = CtlMsg::Toggle {
+            server: ServerKey("/s".into()),
+        };
+
+        let mut buf = Vec::new();
+        write_message(&mut buf, &client).unwrap();
+        write_message(&mut buf, &hook).unwrap();
+        write_message(&mut buf, &ctl).unwrap();
+
+        let mut reader = BufReader::new(Cursor::new(buf));
+        let a: Inbound = read_message(&mut reader).unwrap().unwrap();
+        let b: Inbound = read_message(&mut reader).unwrap().unwrap();
+        let c: Inbound = read_message(&mut reader).unwrap().unwrap();
+        assert_eq!(a, Inbound::Client(client));
+        assert_eq!(b, Inbound::Hook(hook));
+        assert_eq!(c, Inbound::Ctl(ctl));
     }
 
     #[test]
