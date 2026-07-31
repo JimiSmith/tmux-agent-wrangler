@@ -98,8 +98,8 @@ Kept:
 
 - The agent-session **registry** -> a single persistence **snapshot** file the
   daemon loads on start and rewrites on change (low frequency: session
-  start/end). Legacy 2-field records are read once for migration. This is the
-  only on-disk state.
+  start/end). No legacy/back-compat record formats: only the current record is
+  supported. This is the only on-disk state.
 
 ## Crate layout
 
@@ -161,7 +161,7 @@ src/glue/          tmux-entry (bindings, hooks, automatic-rename guard),
   prototype's split: the daemon sends a semantic `Indicator`, the client resolves
   the spinner frame and `fit` at paint time.
 - **proto.rs** — WF1 proto spec applies *partially*. Keep: registry record
-  serialize/parse, legacy 2-field read, session-id/key helpers, `parse_field_int`
+  serialize/parse (current format only), session-id/key helpers, `parse_field_int`
   (the ASCII-isdigit gate), and ns-token minting. Drop: marker read/write,
   selection tab-framing, the flock `claim_attention`, `prune_notified`. Add
   (new): the socket message enum and framing.
@@ -199,9 +199,9 @@ Carry (architecture-independent, from the WF1 risk list):
   per-format file modes and backup, all-or-nothing wrangler-group replacement.
 - Sticky label caches (mtime-keyed, keep-previous-on-empty); Claude float
   `getmtime` vs Copilot `st_mtime_ns` kept as distinct types compared exactly.
-- Byte-exact registry record framing (strip only trailing `\n`, 5-field with
-  genuine empty fields, legacy 2-field accepted, 3-field rejected) for the
-  snapshot and the legacy migration read.
+- Byte-exact registry record framing (strip only trailing `\n`, exactly five
+  fields with genuine empty fields preserved, any other field count rejected)
+  for the snapshot.
 - curses -> crossterm traps: the COLORS>=256 palette gate, default-color
   background, immediate button-down (mouseinterval 0), mode-1004. Note the
   deliberate divergence: crossterm `FocusGained`/`FocusLost` is a wake/redraw

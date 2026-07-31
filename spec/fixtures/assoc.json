@@ -208,37 +208,7 @@
     "expected": null
   },
   {
-    "name": "parse_registry_record/legacy_2field",
-    "input": {
-      "name": "claude-abc",
-      "contents": "%3\t/home/x"
-    },
-    "expected": {
-      "pane": "%3",
-      "agent": "claude",
-      "pid": "",
-      "cwd": "/home/x",
-      "transcript": "",
-      "session_id": "abc"
-    }
-  },
-  {
-    "name": "parse_registry_record/current_4field_no_transcript",
-    "input": {
-      "name": "claude-abc",
-      "contents": "%3\tclaude\t1234\t/home/x"
-    },
-    "expected": {
-      "pane": "%3",
-      "agent": "claude",
-      "pid": "1234",
-      "cwd": "/home/x",
-      "transcript": "",
-      "session_id": "abc"
-    }
-  },
-  {
-    "name": "parse_registry_record/current_5field_transcript",
+    "name": "parse_registry_record/five_field_transcript",
     "input": {
       "name": "claude-abc",
       "contents": "%3\tclaude\t1234\t/home/x\t/t/x.jsonl"
@@ -268,6 +238,21 @@
     }
   },
   {
+    "name": "parse_registry_record/empty_pid_kept",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\tclaude\t\t/home/x\t"
+    },
+    "expected": {
+      "pane": "%3",
+      "agent": "claude",
+      "pid": "",
+      "cwd": "/home/x",
+      "transcript": "",
+      "session_id": "abc"
+    }
+  },
+  {
     "name": "parse_registry_record/trailing_empty_transcript",
     "input": {
       "name": "claude-abc",
@@ -283,23 +268,7 @@
     }
   },
   {
-    "name": "parse_registry_record/three_field_dropped",
-    "input": {
-      "name": "claude-abc",
-      "contents": "%3\tclaude\t1234"
-    },
-    "expected": null
-  },
-  {
-    "name": "parse_registry_record/one_field_dropped",
-    "input": {
-      "name": "claude-abc",
-      "contents": "junkline"
-    },
-    "expected": null
-  },
-  {
-    "name": "parse_registry_record/copilot_5field",
+    "name": "parse_registry_record/copilot_five_field",
     "input": {
       "name": "copilot-xyz",
       "contents": "%1\tcopilot\t99\t/w\t"
@@ -317,7 +286,7 @@
     "name": "parse_registry_record/name_without_prefix",
     "input": {
       "name": "weird",
-      "contents": "%3\tclaude\t1234\t/home/x"
+      "contents": "%3\tclaude\t1234\t/home/x\t"
     },
     "expected": {
       "pane": "%3",
@@ -332,7 +301,7 @@
     "name": "parse_registry_record/trailing_newline_only_stripped",
     "input": {
       "name": "claude-abc",
-      "contents": "%3\tclaude\t1234\t/home/x\n"
+      "contents": "%3\tclaude\t1234\t/home/x\t\n"
     },
     "expected": {
       "pane": "%3",
@@ -344,34 +313,44 @@
     }
   },
   {
-    "name": "parse_registry_record/six_field_extra_ignored",
+    "name": "parse_registry_record/one_field_rejected",
+    "input": {
+      "name": "claude-abc",
+      "contents": "junkline"
+    },
+    "expected": null
+  },
+  {
+    "name": "parse_registry_record/two_fields_rejected",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\t/home/x"
+    },
+    "expected": null
+  },
+  {
+    "name": "parse_registry_record/three_fields_rejected",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\tclaude\t1234"
+    },
+    "expected": null
+  },
+  {
+    "name": "parse_registry_record/four_fields_rejected",
+    "input": {
+      "name": "claude-abc",
+      "contents": "%3\tclaude\t1234\t/home/x"
+    },
+    "expected": null
+  },
+  {
+    "name": "parse_registry_record/six_fields_rejected",
     "input": {
       "name": "claude-abc",
       "contents": "%3\tclaude\t1234\t/home/x\t/t.jsonl\tEXTRA"
     },
-    "expected": {
-      "pane": "%3",
-      "agent": "claude",
-      "pid": "1234",
-      "cwd": "/home/x",
-      "transcript": "/t.jsonl",
-      "session_id": "abc"
-    }
-  },
-  {
-    "name": "parse_registry_record/legacy_paneless",
-    "input": {
-      "name": "claude-leg",
-      "contents": "\t/home/y"
-    },
-    "expected": {
-      "pane": "",
-      "agent": "claude",
-      "pid": "",
-      "cwd": "/home/y",
-      "transcript": "",
-      "session_id": "leg"
-    }
+    "expected": null
   },
   {
     "name": "label_mode_from/'dir'",
