@@ -1,0 +1,84 @@
+name: build-binaries
+
+# Build the prebuilt binaries TPM-installed plugins download. TPM updates a
+# plugin by pulling its branch, so every commit that can land on a tracked
+# branch needs matching binaries: build on each push (and on demand) and publish
+# them to a prerelease named the commit's short SHA, which the plugin resolves
+# from its own checkout to fetch the right assets.
+
+on:
+  push:
+    branches: [main, rust-rewrite-prototype]
+  workflow_dispatch:
+
+# Creating the per-SHA release and its tag needs write access to the repo.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      # Publish whichever targets succeed independently; a release is cut only
+      # when both do (the release job needs this one to pass).
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: wrangler-linux-x64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: wrangler-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+
+      # The musl target links against musl rather than the runner's glibc.
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/wrangler" "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Upsert a prerelease named the short SHA, tagged at the built commit, so a
+      # re-run updates its assets instead of failing on an existing tag.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${GITHUB_SHA::7}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* \
+              --title "$tag" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --notes "Automated build of $tag"
+          fi
