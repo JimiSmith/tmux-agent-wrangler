@@ -12,14 +12,18 @@ render client per sidebar pane, a hook client the agents invoke, and the
 tmux-facing glue commands. They coordinate over one Unix socket. The only
 runtime dependency is `tmux ≥ 3.1`.
 
-`wrangler.tmux` (the TPM entry point) obtains the binary in this order: an
-explicit `wrangler` on `PATH`, a local `target/` build that is not older than
-its sources, the prebuilt release binary for the checked-out commit
-(downloaded once and cached under `$XDG_CACHE_HOME/tmux-agent-wrangler`, only
-for a clean checkout), then a from-source `cargo build --release` run in the
-background. Whenever it produces a *new* binary (a build or a fresh download) it
-runs `tmux-entry --replace-daemon` so the new code replaces a daemon still
-running the old.
+`wrangler.tmux` (the TPM entry point) keeps the binary at one path,
+`$XDG_CACHE_HOME/tmux-agent-wrangler/wrangler-<short-sha>`, whether it was
+downloaded or built, so where a binary came from never factors into resolving
+it. A commit whose binary is already cached runs it; any other commit obtains
+one, preferring the prebuilt release asset for the platform and falling back to
+a backgrounded `cargo build --release` whose artifact is copied into the cache.
+Keying on the commit is what makes an update resolve to a path that does not
+exist yet, so there are no staleness heuristics. Obtaining a new binary runs
+`tmux-entry --replace-daemon`, replacing a daemon still running the old code.
+An explicit `wrangler` on `PATH` overrides all of this, which is how a developer
+runs their own build: a working tree with uncommitted changes still resolves to
+the release binary for its commit.
 
 ## Running / testing changes
 

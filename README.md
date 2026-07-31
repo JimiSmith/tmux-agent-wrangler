@@ -36,10 +36,11 @@ sidebar that follows you.
 
 - tmux ≥ 3.1
 
-The plugin is a single Rust binary. On first load it downloads the prebuilt
-binary for your platform (Linux x64, macOS arm64) matching the commit you have
-checked out; on any other platform, or if the download is unavailable, it builds
-from source with `cargo` in the background instead. Nothing else to install.
+The plugin is a single Rust binary that it manages for you. On first load, and
+after every update, it downloads the prebuilt binary matching the commit you
+have checked out (Linux x64, macOS arm64); on any other platform, or if the
+download is unavailable, it builds from source with `cargo` in the background
+instead. Nothing else to install.
 
 ## Install
 
@@ -122,13 +123,10 @@ so re-running is safe, and re-running it after an update re-points the hooks at
 the new binary.
 
 To wire the hooks manually instead, use the per-agent blocks below, replacing
-`/path/to/wrangler` with your binary. The plugin resolves it in this order: a
-`wrangler` on your `PATH`, then `target/release/wrangler` under the plugin
-directory, then the downloaded copy in
-`$XDG_CACHE_HOME/tmux-agent-wrangler` (default `~/.cache/...`). To find where
-TPM put the plugin, run
-`tmux show-environment -g TMUX_PLUGIN_MANAGER_PATH` — it lives in a
-`tmux-agent-wrangler` directory under that path.
+`/path/to/wrangler` with your binary. Unless you have your own `wrangler` on
+`PATH`, the plugin keeps it in `$XDG_CACHE_HOME/tmux-agent-wrangler` (default
+`~/.cache/...`), named for the commit you have checked out, so prefer the
+automatic install above, which always writes the current path.
 
 ### Claude Code
 
