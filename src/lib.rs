@@ -7,6 +7,7 @@ pub mod platform;
 pub mod client;
 pub mod color;
 pub mod daemon;
+pub mod glue;
 pub mod hook;
 pub mod labels;
 pub mod proto;

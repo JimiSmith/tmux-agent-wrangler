@@ -12,11 +12,11 @@ fn main() -> ExitCode {
         Some("hook") => wrangler::hook::run(&args[2..]),
         Some("daemon") => wrangler::daemon::run(),
         Some("client") => wrangler::client::run(),
-        // Wired up in later integration stages.
-        Some(cmd @ ("toggle" | "focus" | "spawn" | "install-hooks" | "tmux-entry")) => {
-            eprintln!("wrangler: '{cmd}' is not implemented yet");
-            exit(2);
-        }
+        Some("tmux-entry") => wrangler::glue::tmux_entry(),
+        Some("toggle") => wrangler::glue::toggle(),
+        Some("focus") => wrangler::glue::focus(),
+        Some("spawn") => wrangler::glue::spawn(&args[2..]),
+        Some("install-hooks") => wrangler::glue::install::run(&args[2..]),
         Some(other) => {
             eprintln!("wrangler: unknown subcommand '{other}'\n{USAGE}");
             exit(2);

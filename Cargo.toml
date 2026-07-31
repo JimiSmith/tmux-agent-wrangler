@@ -6,7 +6,9 @@ description = "tmux-agent-wrangler: a tmux sidebar for AI-agent sessions (Rust r
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order keeps object key order stable, so merging into a user's shared
+# settings.json does not reshuffle their keys.
+serde_json = { version = "1", features = ["preserve_order"] }
 # Ordered map for the deterministic-iteration parity requirement (registry
 # order, title-collision tiebreaks, notification order).
 indexmap = { version = "2", features = ["serde"] }
