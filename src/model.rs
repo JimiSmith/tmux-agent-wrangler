@@ -74,7 +74,10 @@ pub enum Indicator {
     Attention,
     /// Progress: indeterminate (`pct` None -> spinner) or determinate
     /// (`pct` Some -> percentage), colored by `state`.
-    Progress { pct: Option<u8>, state: ProgressState },
+    Progress {
+        pct: Option<u8>,
+        state: ProgressState,
+    },
 }
 
 /// An agent session's hook turn state. `Working`/`Attention` are mutually
@@ -152,9 +155,17 @@ pub enum RowKey {
 pub enum RowKind {
     Header,
     Blank,
-    Window { active: bool, color: Option<NamedColor> },
-    Pane { color: Option<NamedColor> },
-    Agent { color: Option<NamedColor>, emphatic: bool },
+    Window {
+        active: bool,
+        color: Option<NamedColor>,
+    },
+    Pane {
+        color: Option<NamedColor>,
+    },
+    Agent {
+        color: Option<NamedColor>,
+        emphatic: bool,
+    },
 }
 
 /// One flattened display row the client paints. `key` marks a selectable row.

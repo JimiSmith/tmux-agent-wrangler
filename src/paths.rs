@@ -8,7 +8,9 @@ pub fn state_dir() -> PathBuf {
     let base = match std::env::var_os("XDG_STATE_HOME") {
         Some(v) if !v.is_empty() => PathBuf::from(v),
         _ => {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
             home.join(".local").join("state")
         }
     };

@@ -15,8 +15,7 @@ use crate::model::{Pane, PaneId, Window, WindowId};
 
 /// The `list-windows` format: `window_id`, `window_index`, `window_name`,
 /// `window_active`, tab-separated.
-const WINDOW_FORMAT: &str =
-    "#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}";
+const WINDOW_FORMAT: &str = "#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}";
 
 /// The session-wide `list-panes -s` format. The fixed enum/number fields
 /// (`pane_pb_state`, `pane_pb_progress`, `pane_pid`) precede `pane_current_path`
@@ -52,7 +51,12 @@ pub struct FetchResult {
 /// dead server simply reads as no output. A literal `";"` argument is passed
 /// through verbatim as tmux's own command separator (no shell is involved).
 pub fn run_tmux(socket: &str, args: &[&str]) -> String {
-    match Command::new("tmux").arg("-S").arg(socket).args(args).output() {
+    match Command::new("tmux")
+        .arg("-S")
+        .arg(socket)
+        .args(args)
+        .output()
+    {
         Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
         Err(_) => String::new(),
     }
@@ -179,7 +183,13 @@ pub fn fetch_windows(socket: &str) -> FetchResult {
 pub fn window_real_panes(socket: &str, window: &str) -> Vec<PaneId> {
     let out = run_tmux(
         socket,
-        &["list-panes", "-t", window, "-F", "#{pane_id}\t#{@wrangler_sidebar}"],
+        &[
+            "list-panes",
+            "-t",
+            window,
+            "-F",
+            "#{pane_id}\t#{@wrangler_sidebar}",
+        ],
     );
     let mut panes = Vec::new();
     for line in out.lines() {
@@ -205,7 +215,13 @@ pub fn focus(socket: &str, window: &str, pane: Option<&str>) {
     if target.is_none() {
         let line = run_tmux(
             socket,
-            &["display-message", "-p", "-t", window, "#{pane_id}\t#{@wrangler_sidebar}"],
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                window,
+                "#{pane_id}\t#{@wrangler_sidebar}",
+            ],
         );
         let line = line.trim();
         let (_active, flag) = line.split_once('\t').unwrap_or((line, ""));
@@ -232,7 +248,9 @@ pub fn focus(socket: &str, window: &str, pane: Option<&str>) {
 /// beats `%10`. A pane id not of the `%<digits>` form sorts after every numeric
 /// id. Empty input yields `None`; on a tie the first in order is returned.
 pub fn spawn_race_survivor(sidebars: &[PaneId]) -> Option<&PaneId> {
-    sidebars.iter().min_by_key(|p| p.numeric().unwrap_or(u64::MAX))
+    sidebars
+        .iter()
+        .min_by_key(|p| p.numeric().unwrap_or(u64::MAX))
 }
 
 /// Whether any pane in the session has the `@wrangler_sidebar` flag set (the
@@ -245,9 +263,12 @@ fn session_has_sidebar(socket: &str) -> bool {
 
 /// Whether the given window already holds a sidebar pane.
 fn window_has_sidebar(socket: &str, window: &str) -> bool {
-    run_tmux(socket, &["list-panes", "-t", window, "-F", "#{@wrangler_sidebar}"])
-        .lines()
-        .any(|l| l == "1")
+    run_tmux(
+        socket,
+        &["list-panes", "-t", window, "-F", "#{@wrangler_sidebar}"],
+    )
+    .lines()
+    .any(|l| l == "1")
 }
 
 /// The initial sidebar width in columns from `@wrangler-width`, defaulting to 32
@@ -304,8 +325,19 @@ pub fn spawn(socket: &str, if_active: bool, window: Option<&str>) {
     let pane = run_tmux(
         socket,
         &[
-            "split-window", "-d", "-f", "-h", "-b", "-l", &width, "-t", &win, "-P", "-F",
-            "#{pane_id}", &command,
+            "split-window",
+            "-d",
+            "-f",
+            "-h",
+            "-b",
+            "-l",
+            &width,
+            "-t",
+            &win,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &command,
         ],
     );
     let pane = pane.trim();
@@ -323,7 +355,10 @@ pub fn spawn(socket: &str, if_active: bool, window: Option<&str>) {
 /// Otherwise turn on: spawn one sidebar per window (each spawn is a no-op if that
 /// window already has one).
 pub fn toggle(socket: &str) {
-    let listing = run_tmux(socket, &["list-panes", "-s", "-F", "#{pane_id} #{@wrangler_sidebar}"]);
+    let listing = run_tmux(
+        socket,
+        &["list-panes", "-s", "-F", "#{pane_id} #{@wrangler_sidebar}"],
+    );
     let sidebars: Vec<String> = listing
         .lines()
         .filter_map(|l| {
@@ -357,7 +392,10 @@ pub fn toggle(socket: &str) {
 /// is sent to it so it repaints at once. A window with no sidebar pane is a
 /// no-op; nothing is ever spawned.
 pub fn focus_key(socket: &str) {
-    let listing = run_tmux(socket, &["list-panes", "-F", "#{pane_id} #{@wrangler_sidebar}"]);
+    let listing = run_tmux(
+        socket,
+        &["list-panes", "-F", "#{pane_id} #{@wrangler_sidebar}"],
+    );
     let pane = listing.lines().find_map(|l| {
         let mut fields = l.split_whitespace();
         let id = fields.next()?;
@@ -397,13 +435,28 @@ mod tests {
         let windows_out = "@1\t0\teditor\t1\n@2\t1\tlogs\t0\n";
         let panes_out = [
             // Real, active, OSC-progress pane with a glyph-prefixed title.
-            pane_line("@1", "%1", "0", "1", "", "normal", "42", "1001", "/home/a", "⠋ Working"),
+            pane_line(
+                "@1",
+                "%1",
+                "0",
+                "1",
+                "",
+                "normal",
+                "42",
+                "1001",
+                "/home/a",
+                "⠋ Working",
+            ),
             // Sidebar pane (flag set): excluded from the tree, recorded as a sidebar.
-            pane_line("@1", "%2", "1", "0", "1", "", "", "1002", "/home/a", "sidebar"),
+            pane_line(
+                "@1", "%2", "1", "0", "1", "", "", "1002", "/home/a", "sidebar",
+            ),
             // Real, inactive, empty progress vars.
             pane_line("@1", "%3", "2", "0", "", "", "", "1003", "/home/a", "shell"),
             // Real pane in the second window; a "hidden" state with no percentage.
-            pane_line("@2", "%4", "0", "1", "", "hidden", "", "2001", "/var/log", "tail"),
+            pane_line(
+                "@2", "%4", "0", "1", "", "hidden", "", "2001", "/var/log", "tail",
+            ),
             // Pane in a window that list-windows did not return: dropped.
             pane_line("@9", "%9", "0", "1", "", "", "", "9000", "/x", "ghost"),
         ]
@@ -510,7 +563,11 @@ mod tests {
 
     #[test]
     fn spawn_race_survivor_is_numeric_not_lexical() {
-        let panes = [PaneId("%10".into()), PaneId("%9".into()), PaneId("%2".into())];
+        let panes = [
+            PaneId("%10".into()),
+            PaneId("%9".into()),
+            PaneId("%2".into()),
+        ];
         assert_eq!(spawn_race_survivor(&panes), Some(&PaneId("%2".into())));
 
         // Lexically "%10" < "%9", but numerically 9 < 10 wins.

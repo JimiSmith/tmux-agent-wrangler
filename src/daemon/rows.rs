@@ -8,7 +8,9 @@
 
 use indexmap::IndexMap;
 
-use crate::model::{Indicator, PaneId, ProgressState, Row, RowKey, RowKind, Session, TurnStatus, Window};
+use crate::model::{
+    Indicator, PaneId, ProgressState, Row, RowKey, RowKind, Session, TurnStatus, Window,
+};
 
 /// Pane id -> `(pb_state, pb_progress)` from tmux's OSC 9;4 pane vars. A pane
 /// absent from the map is treated as `("", None)` (inactive OSC), never a panic.
@@ -63,7 +65,10 @@ impl Indicator {
             Indicator::Progress { pct: None, state } => {
                 (spinner_frame(frame).to_string(), state.color())
             }
-            Indicator::Progress { pct: Some(p), state } => (format!("{p}%"), state.color()),
+            Indicator::Progress {
+                pct: Some(p),
+                state,
+            } => (format!("{p}%"), state.color()),
         }
     }
 
@@ -211,7 +216,12 @@ pub fn build_rows(
     rows.push(blank());
 
     for w in windows {
-        rows.push(window_row(w, RowKey::Window { window: w.id.clone() }));
+        rows.push(window_row(
+            w,
+            RowKey::Window {
+                window: w.id.clone(),
+            },
+        ));
         let last = w.panes.len().saturating_sub(1);
         for (i, p) in w.panes.iter().enumerate() {
             let branch = if i == last { "└─" } else { "├─" };
@@ -401,7 +411,12 @@ mod tests {
             name: v["name"].as_str().unwrap().to_string(),
             active: v["active"].as_bool().unwrap(),
             color: None,
-            panes: v["panes"].as_array().unwrap().iter().map(parse_pane).collect(),
+            panes: v["panes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(parse_pane)
+                .collect(),
         }
     }
 
@@ -470,7 +485,10 @@ mod tests {
             let arr = val.as_array().unwrap();
             pane_progress.insert(
                 PaneId(k.clone()),
-                (arr[0].as_str().unwrap().to_string(), arr[1].as_u64().map(|n| n as u8)),
+                (
+                    arr[0].as_str().unwrap().to_string(),
+                    arr[1].as_u64().map(|n| n as u8),
+                ),
             );
         }
         let mut pane_status = PaneStatusMap::new();
@@ -482,7 +500,14 @@ mod tests {
         let hook_on = input["hook_on"].as_bool().unwrap();
         let osc_on = input["osc_on"].as_bool().unwrap();
 
-        let rows = build_rows(&windows, &sessions, &pane_progress, &pane_status, hook_on, osc_on);
+        let rows = build_rows(
+            &windows,
+            &sessions,
+            &pane_progress,
+            &pane_status,
+            hook_on,
+            osc_on,
+        );
 
         assert_eq!(
             rows.len(),
@@ -504,23 +529,46 @@ mod tests {
                     assert!(row.key.is_none(), "blank key: {ctx}");
                 }
                 "window" => {
-                    assert!(matches!(row.kind, RowKind::Window { .. }), "kind window: {ctx}");
-                    assert_eq!(row.key.as_ref(), Some(&parse_key(&item["key"])), "window key: {ctx}");
+                    assert!(
+                        matches!(row.kind, RowKind::Window { .. }),
+                        "kind window: {ctx}"
+                    );
+                    assert_eq!(
+                        row.key.as_ref(),
+                        Some(&parse_key(&item["key"])),
+                        "window key: {ctx}"
+                    );
                 }
                 "pane" => {
                     assert!(matches!(row.kind, RowKind::Pane { .. }), "kind pane: {ctx}");
-                    assert_eq!(row.key.as_ref(), Some(&parse_key(&item["key"])), "pane key: {ctx}");
+                    assert_eq!(
+                        row.key.as_ref(),
+                        Some(&parse_key(&item["key"])),
+                        "pane key: {ctx}"
+                    );
                     assert_indicator(row, item, frame);
                 }
                 "agent" => {
                     if let RowKind::Agent { color, emphatic } = &row.kind {
-                        assert_eq!(*color, parse_color(item["color"].as_str().unwrap()), "agent color: {ctx}");
+                        assert_eq!(
+                            *color,
+                            parse_color(item["color"].as_str().unwrap()),
+                            "agent color: {ctx}"
+                        );
                         let st = item["status"].as_str().unwrap();
-                        assert_eq!(*emphatic, st == "working" || st == "attention", "agent emphatic: {ctx}");
+                        assert_eq!(
+                            *emphatic,
+                            st == "working" || st == "attention",
+                            "agent emphatic: {ctx}"
+                        );
                     } else {
                         panic!("kind agent: {ctx}");
                     }
-                    assert_eq!(row.key.as_ref(), Some(&parse_key(&item["key"])), "agent key: {ctx}");
+                    assert_eq!(
+                        row.key.as_ref(),
+                        Some(&parse_key(&item["key"])),
+                        "agent key: {ctx}"
+                    );
                     assert_indicator(row, item, frame);
                 }
                 other => panic!("unknown item type {other}: {ctx}"),
@@ -585,7 +633,11 @@ mod tests {
                     );
                     let (text, color) = ind.resolve(input["frame"].as_u64().unwrap() as usize);
                     let exp = &case["expected"];
-                    assert_eq!(text, exp["text"].as_str().unwrap(), "progress_indicator/{name} text");
+                    assert_eq!(
+                        text,
+                        exp["text"].as_str().unwrap(),
+                        "progress_indicator/{name} text"
+                    );
                     assert_eq!(
                         color.map(statecolor_str),
                         exp["color"].as_str(),
@@ -595,7 +647,10 @@ mod tests {
                 }
                 "fit" => {
                     assert_eq!(
-                        fit(input["text"].as_str().unwrap(), input["field"].as_u64().unwrap() as usize),
+                        fit(
+                            input["text"].as_str().unwrap(),
+                            input["field"].as_u64().unwrap() as usize
+                        ),
                         case["expected"].as_str().unwrap(),
                         "fit/{name}"
                     );
@@ -620,6 +675,9 @@ mod tests {
             }
         }
         // Sanity: every rows-owned family was exercised.
-        assert!(covered >= 5, "expected to cover rows fixtures, covered {covered}");
+        assert!(
+            covered >= 5,
+            "expected to cover rows fixtures, covered {covered}"
+        );
     }
 }

@@ -237,8 +237,7 @@ pub fn agent_color_table(theme: &str, colors: i32) -> AgentColorTable {
                     .expect("every palette holds all eight agent color names");
                 rgb_to_ansi256(r, g, b) as i16
             }
-            None => palette_ansi_base(name)
-                .expect("AGENT_COLOR_NAMES all have an ANSI base"),
+            None => palette_ansi_base(name).expect("AGENT_COLOR_NAMES all have an ANSI base"),
         };
         indices.insert(name, cnum);
     }
@@ -409,7 +408,12 @@ mod tests {
             covered += 1;
         }
         // Every case in the fixture must be exercised.
-        assert_eq!(covered, cases.len(), "covered {covered} of {} cases", cases.len());
+        assert_eq!(
+            covered,
+            cases.len(),
+            "covered {covered} of {} cases",
+            cases.len()
+        );
     }
 
     fn check_read_theme(name: &str, input: &Value, expected: &Value) -> usize {
@@ -490,8 +494,16 @@ mod tests {
             "data:BASE_UI_PAIRS" => {
                 for (id, (fg, bg)) in BASE_UI_PAIRS {
                     let e = &expected[id.to_string()];
-                    assert_eq!(fg as i64, e["fg"].as_i64().unwrap(), "pair {id} fg [{name}]");
-                    assert_eq!(bg as i64, e["bg"].as_i64().unwrap(), "pair {id} bg [{name}]");
+                    assert_eq!(
+                        fg as i64,
+                        e["fg"].as_i64().unwrap(),
+                        "pair {id} fg [{name}]"
+                    );
+                    assert_eq!(
+                        bg as i64,
+                        e["bg"].as_i64().unwrap(),
+                        "pair {id} bg [{name}]"
+                    );
                 }
             }
             "data:INDICATOR_PAIRS" => {
