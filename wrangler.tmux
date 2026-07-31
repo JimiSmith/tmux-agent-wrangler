@@ -4,15 +4,26 @@
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# A wrangler on PATH is an explicit install: trust it and run it as-is.
 bin="$(command -v wrangler 2>/dev/null)"
-[ -x "$bin" ] || bin="$CURRENT_DIR/target/release/wrangler"
-[ -x "$bin" ] || bin="$CURRENT_DIR/target/debug/wrangler"
-
 if [ -x "$bin" ]; then
   exec "$bin" tmux-entry
 fi
 
-# No prebuilt binary. Build it with cargo if available. The build runs
+# Otherwise use the locally built binary, preferring release over debug.
+bin="$CURRENT_DIR/target/release/wrangler"
+[ -x "$bin" ] || bin="$CURRENT_DIR/target/debug/wrangler"
+
+# A local binary older than its sources (e.g. after a git pull) is stale: fall
+# through to the build path rather than running old code.
+stale=""
+[ -x "$bin" ] && stale="$(find "$CURRENT_DIR/src" "$CURRENT_DIR/Cargo.toml" "$CURRENT_DIR/Cargo.lock" -newer "$bin" -print -quit 2>/dev/null)"
+
+if [ -x "$bin" ] && [ -z "$stale" ]; then
+  exec "$bin" tmux-entry
+fi
+
+# Binary missing or stale. Build it with cargo if available. The build runs
 # backgrounded via run-shell -b so a first-time compile never blocks tmux
 # startup; tmux-entry (key binds, hooks, daemon) runs once the binary exists.
 # Until then the toggle/focus keys are simply unbound.
