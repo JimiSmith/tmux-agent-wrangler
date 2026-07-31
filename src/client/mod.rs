@@ -417,6 +417,87 @@ pub fn run() -> ExitCode {
     }
 }
 
+/// The client-owned width logic. It clamps a user/tmux resize to the floor,
+/// publishes the corrected width for the daemon to relay, and adopts a shared
+/// width the daemon pushes, while never re-publishing a resize it requested
+/// itself. `width` is the pane's last known width; `pending` is a width the
+/// client asked tmux for and is awaiting (so its landing is not mistaken for a
+/// fresh user resize).
+struct WidthSync {
+    width: u16,
+    pending: Option<u16>,
+    floor: u16,
+    sync: bool,
+}
+
+impl WidthSync {
+    fn new(width: u16, floor: u16, sync: bool) -> Self {
+        Self {
+            width,
+            pending: None,
+            floor,
+            sync,
+        }
+    }
+
+    /// A terminal resize left the pane `new_w` wide. Returns `(resize_to,
+    /// publish)`: a width to resize the pane to (a min-width correction) and a
+    /// width to publish to the daemon. A resize the client itself requested (its
+    /// width equals the pending request) is swallowed, returning neither, so an
+    /// adopted or self-corrected width never echoes back as a new user resize.
+    fn on_terminal_resize(&mut self, new_w: u16) -> (Option<u16>, Option<u16>) {
+        let was_ours = self.pending == Some(new_w);
+        self.pending = None;
+        self.width = new_w;
+        if was_ours {
+            return (None, None);
+        }
+        let corrected = new_w.max(self.floor);
+        let resize = if corrected != new_w {
+            self.pending = Some(corrected);
+            Some(corrected)
+        } else {
+            None
+        };
+        let publish = self.sync.then_some(corrected);
+        (resize, publish)
+    }
+
+    /// The daemon relayed a shared width of `cols`. Returns the width to resize
+    /// the pane to, or `None` when sync is off, the pane is already at it, or that
+    /// resize is already pending.
+    fn on_shared_width(&mut self, cols: u16) -> Option<u16> {
+        if !self.sync || cols == self.width || self.pending == Some(cols) {
+            return None;
+        }
+        self.pending = Some(cols);
+        Some(cols)
+    }
+}
+
+/// The sidebar width floor and whether cross-sidebar width sync is on, from
+/// `@wrangler-min-width` (default 24) and `@wrangler-sync-width` (default on).
+fn read_width_options(server: &str) -> (u16, bool) {
+    let floor = crate::tmux::run_tmux(server, &["show-option", "-gqv", "@wrangler-min-width"])
+        .trim()
+        .parse::<u16>()
+        .unwrap_or(24);
+    let sync_raw = crate::tmux::run_tmux(server, &["show-option", "-gqv", "@wrangler-sync-width"]);
+    let sync = !matches!(
+        sync_raw.trim().to_lowercase().as_str(),
+        "off" | "0" | "no" | "false"
+    );
+    (floor, sync)
+}
+
+/// Resize this pane to `cols` columns (best-effort).
+fn resize_pane(server: &str, pane: &str, cols: u16) {
+    let _ = crate::tmux::run_tmux(
+        server,
+        &["resize-pane", "-t", pane, "-x", &cols.to_string()],
+    );
+}
+
 /// The render/input loop. Paints the latest model each tick, drains daemon
 /// pushes, and forwards input. A dropped connection triggers a reconnect; if that
 /// fails, the loop ends.
@@ -429,6 +510,10 @@ fn event_loop(
     let start = Instant::now();
     let mut offset = 0usize;
     let mut model: Option<RowModel> = None;
+
+    let (floor, sync) = read_width_options(&ctx.server.0);
+    let (init_cols, _) = terminal_size().unwrap_or((32, 24));
+    let mut width = WidthSync::new(init_cols, floor, sync);
 
     loop {
         let frame = (start.elapsed().as_secs_f64() / ANIM_INTERVAL) as usize;
@@ -446,8 +531,11 @@ fn event_loop(
         loop {
             match conn.rx.try_recv() {
                 Ok(Incoming::Msg(ServerMsg::Render(m))) => model = Some(m),
-                // Width sync is not adopted yet; ignore the push.
-                Ok(Incoming::Msg(ServerMsg::Width { .. })) => {}
+                Ok(Incoming::Msg(ServerMsg::Width { cols })) => {
+                    if let Some(w) = width.on_shared_width(cols) {
+                        resize_pane(&ctx.server.0, &ctx.pane.0, w);
+                    }
+                }
                 Ok(Incoming::Closed) | Err(TryRecvError::Disconnected) => {
                     let (cols, rows) = terminal_size().unwrap_or((32, 24));
                     match connect(ctx, cols, rows) {
@@ -540,6 +628,20 @@ fn event_loop(
                         event: InputEvent::FocusLost,
                     },
                 );
+            }
+            Event::Resize(new_w, _) => {
+                let (resize, publish) = width.on_terminal_resize(new_w);
+                if let Some(w) = resize {
+                    resize_pane(&ctx.server.0, &ctx.pane.0, w);
+                }
+                if let Some(cols) = publish {
+                    send(
+                        conn,
+                        &ClientMsg::Input {
+                            event: InputEvent::Resize { cols },
+                        },
+                    );
+                }
             }
             _ => {}
         }
@@ -637,6 +739,48 @@ mod tests {
                 window: WindowId("@0".into())
             }
         );
+    }
+
+    #[test]
+    fn user_resize_above_floor_publishes_without_correcting() {
+        let mut w = WidthSync::new(40, 24, true);
+        // A user drag to 30 is above the floor: no correction, publish 30.
+        assert_eq!(w.on_terminal_resize(30), (None, Some(30)));
+        assert_eq!(w.pending, None);
+    }
+
+    #[test]
+    fn user_resize_below_floor_clamps_and_publishes_the_floor() {
+        let mut w = WidthSync::new(40, 24, true);
+        // A drag to 10 is clamped up to 24, which is both the resize and the
+        // published width.
+        assert_eq!(w.on_terminal_resize(10), (Some(24), Some(24)));
+        assert_eq!(w.pending, Some(24));
+        // The clamp's own resize event lands at 24 and is swallowed (no echo).
+        assert_eq!(w.on_terminal_resize(24), (None, None));
+        assert_eq!(w.pending, None);
+    }
+
+    #[test]
+    fn adopted_shared_width_does_not_echo() {
+        let mut w = WidthSync::new(40, 24, true);
+        // A follower adopts the shared width 30, then its resize event lands.
+        assert_eq!(w.on_shared_width(30), Some(30));
+        assert_eq!(w.on_terminal_resize(30), (None, None));
+        // Already at 30: a repeat push is a no-op.
+        assert_eq!(w.on_shared_width(30), None);
+    }
+
+    #[test]
+    fn sync_off_never_publishes_or_adopts() {
+        let mut w = WidthSync::new(40, 24, false);
+        // A user drag above the floor still applies no correction and, with sync
+        // off, publishes nothing.
+        assert_eq!(w.on_terminal_resize(30), (None, None));
+        // A relayout below the floor still clamps locally, but publishes nothing.
+        assert_eq!(w.on_terminal_resize(10), (Some(24), None));
+        // A relayed width is ignored entirely.
+        assert_eq!(w.on_shared_width(50), None);
     }
 
     #[test]
