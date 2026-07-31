@@ -10,6 +10,5 @@ serde_json = "1"
 # Ordered map for the deterministic-iteration parity requirement (registry
 # order, title-collision tiebreaks, notification order).
 indexmap = { version = "2", features = ["serde"] }
-
-# tokio + ratatui + crossterm are added in the integration phase (WF3); the
-# pure-logic modules ported in WF2 need only serde.
+# Liveness probe for a recorded agent pid via kill(pid, 0).
+libc = "0.2"

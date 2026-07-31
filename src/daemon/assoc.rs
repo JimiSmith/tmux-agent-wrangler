@@ -10,6 +10,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
+use indexmap::{IndexMap, IndexSet};
+
+use crate::labels::{agent_label, LabelCache, LabelMode};
+use crate::model::{NamedColor, PaneId, Session, SessionKey, TurnStatus, Window, WindowId};
+
 /// One parsed hook-registry file. `pane`..`transcript` are the on-disk body
 /// fields; `session_id` is derived from the file name (the `<agent>-` prefix
 /// stripped). All body fields are kept as raw strings so an empty pane (a
@@ -24,6 +29,19 @@ pub struct RegistryRecord {
     pub cwd: String,
     pub transcript: String,
     pub session_id: String,
+}
+
+/// One live registry entry as the association pass consumes it: the parsed
+/// record plus the turn state distilled from its markers. `status` reflects the
+/// working marker (`Working`) or its absence (`Idle`); `attention_token` is
+/// `Some` exactly while an attention marker is present, carrying that event's
+/// token. When a token is present the emitted status is `Attention` regardless
+/// of `status`, so the two are consistent even if set independently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegistrySession {
+    pub record: RegistryRecord,
+    pub status: TurnStatus,
+    pub attention_token: Option<i128>,
 }
 
 /// All-ASCII-digit gate (tokens/pids are ASCII from `printf`/tmux). True only
@@ -144,6 +162,26 @@ pub fn ppid_map() -> HashMap<u32, u32> {
     }
 }
 
+/// Whether a process with `pid` currently exists, probed with a zero signal that
+/// performs error-checking without delivering anything. A successful probe, or an
+/// `EPERM` (the process exists but is not ours to signal), means alive; `ESRCH`
+/// (no such process) means dead. A zero pid is treated as dead, never probed, so
+/// the zero-pid process-group semantics of the underlying call are avoided.
+///
+/// Side effect: sends signal 0 to `pid` (no signal is delivered).
+pub fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    // Only "no such process" is dead; every other error (e.g. a permission
+    // denial for another user's process) means the process is alive.
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
 /// Read an attention marker's event token, including tokenless markers.
 ///
 /// Reads the file, trims (Unicode whitespace) its contents; if the trimmed body
@@ -224,6 +262,256 @@ pub fn serialize_registry_record(rec: &RegistryRecord) -> String {
         "{}\t{}\t{}\t{}\t{}\n",
         rec.pane, rec.agent, rec.pid, rec.cwd, rec.transcript
     )
+}
+
+/// Map a color-name string to its [`NamedColor`], or `None` for the empty string
+/// or any unrecognized name (which then paints in the default agent color).
+fn named_color(name: &str) -> Option<NamedColor> {
+    Some(match name {
+        "red" => NamedColor::Red,
+        "blue" => NamedColor::Blue,
+        "green" => NamedColor::Green,
+        "yellow" => NamedColor::Yellow,
+        "purple" => NamedColor::Purple,
+        "orange" => NamedColor::Orange,
+        "pink" => NamedColor::Pink,
+        "cyan" => NamedColor::Cyan,
+        _ => return None,
+    })
+}
+
+/// The trailing path component displayed for a session's directory: the basename
+/// after trailing slashes are trimmed, or the whole path when that leaves nothing
+/// (a root-only or empty path).
+fn dir_basename(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    let base = trimmed.rsplit('/').next().unwrap_or("");
+    if base.is_empty() {
+        path.to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+/// The registry key for a record: the `<agent>-<session_id>` file-name identity
+/// used in row keys and as the prune handle.
+fn registry_key(rec: &RegistryRecord) -> SessionKey {
+    SessionKey(format!("{}-{}", rec.agent, rec.session_id))
+}
+
+/// A surviving registry entry with its identity and turn state resolved, ready
+/// to be placed under the panes displaying it.
+struct Candidate {
+    key: SessionKey,
+    agent: String,
+    recorded_pane: String,
+    pid: String,
+    cwd: String,
+    title: String,
+    agent_name: String,
+    team: String,
+    color: Option<NamedColor>,
+    status: TurnStatus,
+}
+
+/// Associate live agent sessions to the panes/windows displaying them.
+///
+/// Returns the per-window/per-pane placements and the keys of entries to prune.
+/// A session displayed in no local pane is dropped, not placed: it reappears the
+/// instant a pane shows it again. A session shown in several panes yields one
+/// placement per pane, so it can appear under more than one window.
+///
+/// Pruned in a first pass: an entry whose numeric pid is dead, and an entry whose
+/// recorded pane exists in neither the local window tree nor `all_panes` while no
+/// numeric pid vouches for it. A pruned entry is never placed.
+///
+/// A recorded pane counts as a placement only when the agent genuinely occupies
+/// it — its recorded pid descends from that pane's top-level process
+/// (`pane_pids`), confirmed against `parents`. A record with no numeric pid cannot
+/// be verified and is trusted. A pane-less entry, or one whose recorded pane is
+/// not occupied, is associated purely by title: a pane whose glyph-stripped title
+/// equals exactly one entry's title is owned by it; a title shared by several
+/// entries is broken by the recorded pane, then the displayed cwd, and left
+/// unassigned if still ambiguous. An empty title never matches.
+///
+/// The emitted status is `Attention` when an attention token is present, else
+/// `Working`, else `Idle`. The displayed directory tracks the pane's live path
+/// (`pane_paths`), falling back to the recorded cwd when the pane reports none.
+///
+/// A row's color is the session's own recorded color; a teammate that recorded
+/// none instead takes the color assigned to its pane in its team's config (looked
+/// up only when the record has a name but no color of its own).
+#[allow(clippy::too_many_arguments)]
+pub fn fetch_agent_sessions(
+    registry: &[RegistrySession],
+    windows: &[Window],
+    all_panes: &IndexSet<PaneId>,
+    pane_paths: &IndexMap<PaneId, String>,
+    pane_pids: &IndexMap<PaneId, u32>,
+    parents: &HashMap<u32, u32>,
+    labels: &mut LabelCache,
+    label_mode: LabelMode,
+) -> (Vec<Session>, Vec<SessionKey>) {
+    // The local window tree, indexed for placement. `pane_titles` holds each real
+    // pane's glyph-stripped title, the string matched against a session's own
+    // title; a pane with an empty stripped title cannot own a session.
+    let mut pane_to_window: IndexMap<PaneId, WindowId> = IndexMap::new();
+    let mut pane_titles: IndexMap<PaneId, String> = IndexMap::new();
+    for w in windows {
+        for p in &w.panes {
+            pane_to_window.insert(p.id.clone(), w.id.clone());
+            pane_titles.insert(p.id.clone(), strip_status_prefix(&p.title));
+        }
+    }
+
+    // Pass 1: prune the dead/stale, resolve each survivor's identity and title.
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut prune: Vec<SessionKey> = Vec::new();
+    for rs in registry {
+        let rec = &rs.record;
+        // A dead agent process is gone everywhere.
+        if let Some(pid) = parse_field_int(&rec.pid) {
+            if !pid_alive(pid) {
+                prune.push(registry_key(rec));
+                continue;
+            }
+        }
+        let pid_is_digit = is_field_digits(&rec.pid);
+        // A recorded pane present nowhere, with no numeric pid to vouch for it,
+        // is a stale record. A pane held by another window/session (in
+        // `all_panes`) is not local here but is not pruned.
+        if !rec.pane.is_empty()
+            && !pane_to_window.contains_key(&PaneId(rec.pane.clone()))
+            && !all_panes.contains(&PaneId(rec.pane.clone()))
+            && !pid_is_digit
+        {
+            prune.push(registry_key(rec));
+            continue;
+        }
+        let meta = labels.session_meta(&rec.agent, &rec.transcript, &rec.session_id);
+        let status = if rs.attention_token.is_some() {
+            TurnStatus::Attention
+        } else if matches!(rs.status, TurnStatus::Working) {
+            TurnStatus::Working
+        } else {
+            TurnStatus::Idle
+        };
+        candidates.push(Candidate {
+            key: registry_key(rec),
+            agent: rec.agent.clone(),
+            recorded_pane: rec.pane.clone(),
+            pid: rec.pid.clone(),
+            cwd: rec.cwd.clone(),
+            title: meta.title,
+            agent_name: meta.agent_name,
+            team: meta.team,
+            color: named_color(&meta.color),
+            status,
+        });
+    }
+
+    // Resolve which candidate owns each local pane by title. A single match wins
+    // outright; a collision is broken by the recorded pane, then the displayed
+    // cwd, and left unowned if still ambiguous (better no jump than a wrong one).
+    let mut pane_owner: IndexMap<PaneId, usize> = IndexMap::new();
+    for (pid, ptitle) in &pane_titles {
+        if ptitle.is_empty() {
+            continue;
+        }
+        let matched: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| &c.title == ptitle)
+            .map(|(i, _)| i)
+            .collect();
+        let owner = match matched.len() {
+            1 => Some(matched[0]),
+            0 => None,
+            _ => {
+                let by_pane: Vec<usize> = matched
+                    .iter()
+                    .copied()
+                    .filter(|&i| candidates[i].recorded_pane == pid.0)
+                    .collect();
+                let pool = if by_pane.is_empty() {
+                    matched
+                        .iter()
+                        .copied()
+                        .filter(|&i| pane_paths.get(pid) == Some(&candidates[i].cwd))
+                        .collect()
+                } else {
+                    by_pane
+                };
+                (pool.len() == 1).then(|| pool[0])
+            }
+        };
+        if let Some(o) = owner {
+            pane_owner.insert(pid.clone(), o);
+        }
+    }
+
+    // Pass 2: place each candidate under every pane displaying it — its occupied
+    // recorded pane first, then each pane whose title it owns.
+    let mut sessions: Vec<Session> = Vec::new();
+    for (ci, c) in candidates.iter().enumerate() {
+        let mut matched: Vec<PaneId> = Vec::new();
+        if !c.recorded_pane.is_empty() {
+            let rp = PaneId(c.recorded_pane.clone());
+            if pane_to_window.contains_key(&rp) {
+                let occupies = match parse_field_int(&c.pid) {
+                    Some(pid) => {
+                        process_under(pid, pane_pids.get(&rp).copied().unwrap_or(0), parents)
+                    }
+                    // No numeric pid to verify against: the recorded pane is trusted.
+                    None => true,
+                };
+                if occupies {
+                    matched.push(rp);
+                }
+            }
+        }
+        for (pid, &owner_idx) in &pane_owner {
+            if owner_idx == ci && !matched.contains(pid) {
+                matched.push(pid.clone());
+            }
+        }
+
+        // A teammate row with no color of its own falls back to the per-pane
+        // color name from its team config; the lookup is skipped for a record
+        // with a color already or with no name (a non-teammate).
+        let team_map = if c.color.is_none() && !c.agent_name.is_empty() {
+            labels.team_pane_colors(&c.team)
+        } else {
+            IndexMap::new()
+        };
+
+        for pane in matched {
+            let window = pane_to_window
+                .get(&pane)
+                .expect("a matched pane is always a local pane")
+                .clone();
+            let display_cwd = pane_paths
+                .get(&pane)
+                .filter(|p| !p.is_empty())
+                .cloned()
+                .unwrap_or_else(|| c.cwd.clone());
+            let dir_name = dir_basename(&display_cwd);
+            let color = c
+                .color
+                .or_else(|| team_map.get(&pane.0).and_then(|name| named_color(name)));
+            sessions.push(Session {
+                id: c.key.clone(),
+                agent: c.agent.clone(),
+                pane,
+                window,
+                label: agent_label(label_mode, &c.title, &c.agent_name, &dir_name),
+                color,
+                status: c.status,
+            });
+        }
+    }
+
+    (sessions, prune)
 }
 
 #[cfg(test)]
@@ -365,7 +653,7 @@ garbage line here
         assert_eq!(parents.get(&42), Some(&1));
         assert_eq!(parents.get(&9), Some(&8)); // third column ignored
         assert_eq!(parents.get(&1234), Some(&6000)); // last write wins
-        // `[kernel] 1` and `garbage line here` contribute nothing.
+                                                     // `[kernel] 1` and `garbage line here` contribute nothing.
         assert_eq!(parents.len(), 4);
 
         assert!(parse_ppid_stdout("").is_empty());
@@ -458,6 +746,29 @@ garbage line here
     }
 
     #[test]
+    fn pid_alive_self_is_alive() {
+        // This process is running, so its own pid must probe alive.
+        assert!(pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn pid_alive_zero_is_dead() {
+        // A zero pid is never probed and reports dead.
+        assert!(!pid_alive(0));
+    }
+
+    #[test]
+    fn pid_alive_reaped_child_is_dead() {
+        // A child that has exited and been waited on no longer exists.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("wait true");
+        assert!(!pid_alive(pid));
+    }
+
+    #[test]
     fn process_under_bound_stops_a_cycle() {
         // Without the 4096 cap this 2-cycle would loop forever; the ancestor is
         // never on the cycle, so it must terminate false.
@@ -465,5 +776,671 @@ garbage line here
         parents.insert(10u32, 20u32);
         parents.insert(20u32, 10u32);
         assert!(!process_under(10, 999, &parents));
+    }
+
+    // --- fetch_agent_sessions ------------------------------------------------
+
+    static ASSOC_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    // Serializes tests that mutate the process-wide `CLAUDE_CONFIG_DIR`, so a
+    // concurrent test cannot observe another's temporary value. Poison from a
+    // failed assertion in one holder is recovered so it does not cascade.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn pane(id: &str, title: &str) -> crate::model::Pane {
+        crate::model::Pane {
+            id: PaneId(id.into()),
+            index: "0".into(),
+            active: false,
+            title: title.into(),
+            pb_state: String::new(),
+            pb_progress: None,
+            color: None,
+        }
+    }
+
+    fn window(id: &str, panes: Vec<crate::model::Pane>) -> Window {
+        Window {
+            id: WindowId(id.into()),
+            index: "1".into(),
+            name: "w".into(),
+            active: false,
+            color: None,
+            panes,
+        }
+    }
+
+    fn record(
+        pane: &str,
+        agent: &str,
+        pid: &str,
+        cwd: &str,
+        transcript: &str,
+        session_id: &str,
+    ) -> RegistryRecord {
+        RegistryRecord {
+            pane: pane.into(),
+            agent: agent.into(),
+            pid: pid.into(),
+            cwd: cwd.into(),
+            transcript: transcript.into(),
+            session_id: session_id.into(),
+        }
+    }
+
+    fn reg(record: RegistryRecord, status: TurnStatus, token: Option<i128>) -> RegistrySession {
+        RegistrySession {
+            record,
+            status,
+            attention_token: token,
+        }
+    }
+
+    /// A Claude transcript file whose tail resolves to `title`. The caller removes
+    /// it; each call gets a unique path so parallel tests do not collide.
+    fn claude_transcript(title: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "wrangler_assoc_scan_{}_{}",
+            std::process::id(),
+            ASSOC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(
+            &p,
+            format!("{{\"type\":\"ai-title\",\"aiTitle\":\"{title}\"}}\n"),
+        )
+        .unwrap();
+        p
+    }
+
+    fn ipaths(pairs: &[(&str, &str)]) -> IndexMap<PaneId, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (PaneId((*k).into()), (*v).into()))
+            .collect()
+    }
+
+    fn ipids(pairs: &[(&str, u32)]) -> IndexMap<PaneId, u32> {
+        pairs
+            .iter()
+            .map(|(k, v)| (PaneId((*k).into()), *v))
+            .collect()
+    }
+
+    fn ipanes(ids: &[&str]) -> IndexSet<PaneId> {
+        ids.iter().map(|id| PaneId((*id).into())).collect()
+    }
+
+    /// A pid that is guaranteed dead: a child spawned and reaped, so its id no
+    /// longer names a live process.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("wait true");
+        pid
+    }
+
+    #[test]
+    fn recorded_pane_occupied_is_placed() {
+        // The agent pid descends from the pane's top-level process, so the
+        // recorded pane counts as a placement.
+        let self_pid = std::process::id();
+        let windows = vec![window("@1", vec![pane("%1", "")])];
+        let registry = vec![reg(
+            record("%1", "claude", &self_pid.to_string(), "/home/x", "", "abc"),
+            TurnStatus::Idle,
+            None,
+        )];
+        let mut parents = HashMap::new();
+        parents.insert(self_pid, 2u32);
+        let mut cache = LabelCache::new();
+
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1"]),
+            &ipaths(&[("%1", "/live/dir")]),
+            &ipids(&[("%1", 2)]),
+            &parents,
+            &mut cache,
+            LabelMode::Name,
+        );
+
+        assert!(prune.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].pane, PaneId("%1".into()));
+        assert_eq!(sessions[0].window, WindowId("@1".into()));
+        assert_eq!(sessions[0].id, SessionKey("claude-abc".into()));
+        // No title, so the label falls back to the live path's basename.
+        assert_eq!(sessions[0].label, "dir");
+        assert_eq!(sessions[0].status, TurnStatus::Idle);
+    }
+
+    #[test]
+    fn recorded_pane_inherited_is_not_placed() {
+        // The pid does not descend from the pane's top-level process (an inherited
+        // pane id), so the recorded pane is not a placement and, with no title
+        // match, the session is dropped — but the live entry is not pruned.
+        let self_pid = std::process::id();
+        let windows = vec![window("@1", vec![pane("%1", "")])];
+        let registry = vec![reg(
+            record("%1", "claude", &self_pid.to_string(), "/home/x", "", "abc"),
+            TurnStatus::Idle,
+            None,
+        )];
+        let mut parents = HashMap::new();
+        parents.insert(self_pid, 1u32);
+        let mut cache = LabelCache::new();
+
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1"]),
+            &ipaths(&[("%1", "/live")]),
+            &ipids(&[("%1", 2)]),
+            &parents,
+            &mut cache,
+            LabelMode::Name,
+        );
+
+        assert!(sessions.is_empty());
+        assert!(prune.is_empty());
+    }
+
+    #[test]
+    fn title_matched_daemon_session_is_placed() {
+        // A pane-less entry is associated to the local pane whose stripped title
+        // equals its own title.
+        let transcript = claude_transcript("MySession");
+        let windows = vec![window("@1", vec![pane("%1", "MySession")])];
+        let registry = vec![reg(
+            record(
+                "",
+                "claude",
+                "",
+                "/rec/cwd",
+                transcript.to_str().unwrap(),
+                "dae",
+            ),
+            TurnStatus::Working,
+            None,
+        )];
+        let mut cache = LabelCache::new();
+
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1"]),
+            &ipaths(&[("%1", "/live/proj")]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+
+        assert!(prune.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].pane, PaneId("%1".into()));
+        assert_eq!(sessions[0].window, WindowId("@1".into()));
+        assert_eq!(sessions[0].id, SessionKey("claude-dae".into()));
+        assert_eq!(sessions[0].label, "MySession");
+        assert_eq!(sessions[0].status, TurnStatus::Working);
+
+        let _ = std::fs::remove_file(&transcript);
+    }
+
+    #[test]
+    fn one_session_under_two_windows() {
+        // The same title shown in two panes (two windows) yields one placement
+        // per pane.
+        let transcript = claude_transcript("Shared");
+        let windows = vec![
+            window("@1", vec![pane("%1", "Shared")]),
+            window("@2", vec![pane("%2", "Shared")]),
+        ];
+        let registry = vec![reg(
+            record("", "claude", "", "/c", transcript.to_str().unwrap(), "dae"),
+            TurnStatus::Idle,
+            None,
+        )];
+        let mut cache = LabelCache::new();
+
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1", "%2"]),
+            &ipaths(&[("%1", "/a"), ("%2", "/b")]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+
+        assert!(prune.is_empty());
+        assert_eq!(sessions.len(), 2);
+        // Placement order follows the window/pane iteration order.
+        assert_eq!(sessions[0].pane, PaneId("%1".into()));
+        assert_eq!(sessions[0].window, WindowId("@1".into()));
+        assert_eq!(sessions[1].pane, PaneId("%2".into()));
+        assert_eq!(sessions[1].window, WindowId("@2".into()));
+        assert!(sessions
+            .iter()
+            .all(|s| s.id == SessionKey("claude-dae".into())));
+
+        let _ = std::fs::remove_file(&transcript);
+    }
+
+    #[test]
+    fn title_collision_broken_by_recorded_pane() {
+        // Two entries share a title; the pane displaying it is owned by the one
+        // whose recorded pane is that very pane.
+        let transcript = claude_transcript("Dup");
+        let t = transcript.to_str().unwrap();
+        let windows = vec![window("@1", vec![pane("%1", "Dup")])];
+        let registry = vec![
+            reg(
+                record("%1", "claude", "", "/x", t, "one"),
+                TurnStatus::Idle,
+                None,
+            ),
+            reg(
+                record("%9", "claude", "", "/y", t, "two"),
+                TurnStatus::Idle,
+                None,
+            ),
+        ];
+        let mut cache = LabelCache::new();
+
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1", "%9"]),
+            &ipaths(&[("%1", "/live")]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+
+        assert!(prune.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].pane, PaneId("%1".into()));
+        assert_eq!(sessions[0].id, SessionKey("claude-one".into()));
+
+        let _ = std::fs::remove_file(&transcript);
+    }
+
+    #[test]
+    fn title_collision_broken_by_cwd() {
+        // Neither entry's recorded pane is the displaying pane, so the tie falls
+        // to the entry whose recorded cwd equals the pane's live path.
+        let transcript = claude_transcript("Dup");
+        let t = transcript.to_str().unwrap();
+        let windows = vec![window("@1", vec![pane("%1", "Dup")])];
+        let registry = vec![
+            reg(
+                record("", "claude", "", "/proj/a", t, "one"),
+                TurnStatus::Idle,
+                None,
+            ),
+            reg(
+                record("", "claude", "", "/proj/b", t, "two"),
+                TurnStatus::Idle,
+                None,
+            ),
+        ];
+        let mut cache = LabelCache::new();
+
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1"]),
+            &ipaths(&[("%1", "/proj/a")]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+
+        assert!(prune.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].pane, PaneId("%1".into()));
+        assert_eq!(sessions[0].id, SessionKey("claude-one".into()));
+
+        let _ = std::fs::remove_file(&transcript);
+    }
+
+    #[test]
+    fn dropped_when_no_local_pane_shows_it() {
+        // The recorded pane belongs to another window/session (present in
+        // `all_panes`, absent from the local tree) and no title matches, so the
+        // session is dropped but not pruned.
+        let transcript = claude_transcript("Zzz");
+        let self_pid = std::process::id();
+        let windows = vec![window("@1", vec![pane("%1", "Other")])];
+        let registry = vec![reg(
+            record(
+                "%2",
+                "claude",
+                &self_pid.to_string(),
+                "/c",
+                transcript.to_str().unwrap(),
+                "elsewhere",
+            ),
+            TurnStatus::Idle,
+            None,
+        )];
+        let mut cache = LabelCache::new();
+
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1", "%2"]),
+            &ipaths(&[("%1", "/a"), ("%2", "/b")]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+
+        assert!(sessions.is_empty());
+        assert!(prune.is_empty());
+
+        let _ = std::fs::remove_file(&transcript);
+    }
+
+    #[test]
+    fn prunes_dead_pid() {
+        let dead = dead_pid();
+        let windows = vec![window("@1", vec![pane("%1", "")])];
+        let registry = vec![reg(
+            record("%1", "claude", &dead.to_string(), "/c", "", "gone"),
+            TurnStatus::Idle,
+            None,
+        )];
+        let mut cache = LabelCache::new();
+
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1"]),
+            &ipaths(&[]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+
+        assert!(sessions.is_empty());
+        assert_eq!(prune, vec![SessionKey("claude-gone".into())]);
+    }
+
+    #[test]
+    fn prunes_stale_recorded_pane() {
+        // A recorded pane present nowhere, with no numeric pid to vouch for it,
+        // is stale and pruned.
+        let windows = vec![window("@1", vec![pane("%1", "")])];
+        let registry = vec![reg(
+            record("%9", "claude", "", "/c", "", "stale"),
+            TurnStatus::Idle,
+            None,
+        )];
+        let mut cache = LabelCache::new();
+
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1"]),
+            &ipaths(&[]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+
+        assert!(sessions.is_empty());
+        assert_eq!(prune, vec![SessionKey("claude-stale".into())]);
+    }
+
+    #[test]
+    fn attention_token_forces_attention_status() {
+        // An attention token overrides the marker status: the placement reports
+        // Attention even when the carried status is Idle.
+        let transcript = claude_transcript("A");
+        let windows = vec![window("@1", vec![pane("%1", "A")])];
+        let registry = vec![reg(
+            record("", "claude", "", "/c", transcript.to_str().unwrap(), "att"),
+            TurnStatus::Idle,
+            Some(123),
+        )];
+        let mut cache = LabelCache::new();
+
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1"]),
+            &ipaths(&[("%1", "/live")]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+
+        assert!(prune.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, TurnStatus::Attention);
+
+        let _ = std::fs::remove_file(&transcript);
+    }
+
+    /// Write a Claude teammate transcript whose tail resolves to `title`,
+    /// `agentName`, `teamName`, and (when non-empty) an `agent-color`. Each call
+    /// gets a unique path; the caller removes it.
+    fn teammate_transcript(title: &str, team: &str, color: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "wrangler_assoc_team_{}_{}",
+            std::process::id(),
+            ASSOC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut body = format!(
+            "{{\"type\":\"ai-title\",\"aiTitle\":\"{title}\"}}\n\
+             {{\"agentName\":\"tm\",\"teamName\":\"{team}\"}}\n"
+        );
+        if !color.is_empty() {
+            body.push_str(&format!(
+                "{{\"type\":\"agent-color\",\"agentColor\":\"{color}\"}}\n"
+            ));
+        }
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn teammate_color_from_team_config_and_own_color_wins() {
+        // A teammate that records no color of its own takes the color assigned to
+        // its pane in the team config; a teammate that records its own color keeps
+        // it and ignores the team config.
+        let dir = std::env::temp_dir().join(format!(
+            "wrangler_assoc_teamdir_{}_{}",
+            std::process::id(),
+            ASSOC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let team_cfg = dir.join("teams").join("myteam");
+        std::fs::create_dir_all(&team_cfg).unwrap();
+        std::fs::write(
+            team_cfg.join("config.json"),
+            r#"{"members":[{"tmuxPaneId":"%1","color":"purple"},{"tmuxPaneId":"%2","color":"orange"}]}"#,
+        )
+        .unwrap();
+
+        let ta = teammate_transcript("RowA", "myteam", "");
+        let tb = teammate_transcript("RowB", "myteam", "red");
+        let windows = vec![window("@1", vec![pane("%1", "RowA"), pane("%2", "RowB")])];
+        let registry = vec![
+            reg(
+                record("", "claude", "", "/c", ta.to_str().unwrap(), "aa"),
+                TurnStatus::Idle,
+                None,
+            ),
+            reg(
+                record("", "claude", "", "/c", tb.to_str().unwrap(), "bb"),
+                TurnStatus::Idle,
+                None,
+            ),
+        ];
+        let mut cache = LabelCache::new();
+
+        let _env = lock_env();
+        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1", "%2"]),
+            &ipaths(&[("%1", "/live"), ("%2", "/live")]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+
+        assert!(prune.is_empty());
+        assert_eq!(sessions.len(), 2);
+        let a = sessions
+            .iter()
+            .find(|s| s.id == SessionKey("claude-aa".into()))
+            .unwrap();
+        let b = sessions
+            .iter()
+            .find(|s| s.id == SessionKey("claude-bb".into()))
+            .unwrap();
+        // No own color -> the team config's pane color.
+        assert_eq!(a.color, Some(NamedColor::Purple));
+        // Own color present -> the team config is not consulted.
+        assert_eq!(b.color, Some(NamedColor::Red));
+
+        let _ = std::fs::remove_file(&ta);
+        let _ = std::fs::remove_file(&tb);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn top_level_session_never_takes_a_team_color() {
+        // A non-teammate (empty agent_name) records no team, so even with a team
+        // config present for a pane it occupies, its color stays unset.
+        let dir = std::env::temp_dir().join(format!(
+            "wrangler_assoc_teamdir_{}_{}",
+            std::process::id(),
+            ASSOC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        // A config for the empty team, keyed so that %1 would resolve to a color
+        // if it were ever consulted for a non-teammate.
+        let team_cfg = dir.join("teams").join("");
+        std::fs::create_dir_all(&team_cfg).unwrap();
+        std::fs::write(
+            team_cfg.join("config.json"),
+            r#"{"members":[{"tmuxPaneId":"%1","color":"purple"}]}"#,
+        )
+        .unwrap();
+
+        let transcript = claude_transcript("Solo");
+        let windows = vec![window("@1", vec![pane("%1", "Solo")])];
+        let registry = vec![reg(
+            record("", "claude", "", "/c", transcript.to_str().unwrap(), "solo"),
+            TurnStatus::Idle,
+            None,
+        )];
+        let mut cache = LabelCache::new();
+
+        let _env = lock_env();
+        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1"]),
+            &ipaths(&[("%1", "/live")]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+
+        assert!(prune.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].color, None);
+
+        let _ = std::fs::remove_file(&transcript);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn teammate_with_missing_team_config_gets_no_color() {
+        // A teammate with no own color and no team config file on disk falls back
+        // to nothing rather than inventing a color.
+        let dir = std::env::temp_dir().join(format!(
+            "wrangler_assoc_teamdir_{}_{}",
+            std::process::id(),
+            ASSOC_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        // Deliberately no teams/<team>/config.json is written under `dir`.
+
+        let ta = teammate_transcript("RowA", "ghostteam", "");
+        let windows = vec![window("@1", vec![pane("%1", "RowA")])];
+        let registry = vec![reg(
+            record("", "claude", "", "/c", ta.to_str().unwrap(), "aa"),
+            TurnStatus::Idle,
+            None,
+        )];
+        let mut cache = LabelCache::new();
+
+        let _env = lock_env();
+        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        let (sessions, prune) = fetch_agent_sessions(
+            &registry,
+            &windows,
+            &ipanes(&["%1"]),
+            &ipaths(&[("%1", "/live")]),
+            &ipids(&[]),
+            &HashMap::new(),
+            &mut cache,
+            LabelMode::Name,
+        );
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+
+        assert!(prune.is_empty());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].color, None);
+
+        let _ = std::fs::remove_file(&ta);
+    }
+
+    #[test]
+    fn dir_basename_edge_cases() {
+        assert_eq!(dir_basename("/home/user/proj"), "proj");
+        assert_eq!(dir_basename("/home/user/proj/"), "proj");
+        assert_eq!(dir_basename("proj"), "proj");
+        // A root-only path has no basename, so the whole path stands.
+        assert_eq!(dir_basename("/"), "/");
+        assert_eq!(dir_basename(""), "");
     }
 }

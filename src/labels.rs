@@ -3,12 +3,16 @@
 //!
 //! The pure core: the YAML scalar/field decoders, the Claude transcript tail
 //! scan, the label composition, and the title-resolution rules
-//! (`resolve_claude_meta`, `copilot_title_from_text`).
+//! (`resolve_claude_meta`, `copilot_title_from_text`). [`LabelCache`] wraps that
+//! core with the file reads and per-file mtime caches that make repeated
+//! resolutions cheap.
 
+use indexmap::IndexMap;
 use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 /// Only the transcript's tail is scanned: the title records sit within a few KB
 /// of EOF in practice, so this stays cheap regardless of transcript size. The
@@ -376,6 +380,235 @@ pub fn copilot_title_from_text(text: &str) -> String {
     String::new()
 }
 
+// --- the mtime-keyed session-meta cache --------------------------------------
+
+/// A Claude cache slot: the transcript mtime as float seconds paired with the
+/// sticky state last resolved from it.
+#[derive(Clone, Debug)]
+struct ClaudeSlot {
+    mtime: f64,
+    state: ClaudeMetaState,
+}
+
+/// A Copilot cache slot: the `workspace.yaml` mtime in whole nanoseconds paired
+/// with the last non-empty title resolved from it. A distinct integer key type
+/// from the Claude float, matching each source's stat precision.
+#[derive(Clone, Debug)]
+struct CopilotSlot {
+    mtime_ns: u128,
+    title: String,
+}
+
+/// A team cache slot: the team config's float-seconds mtime paired with the
+/// pane -> color-name map last parsed from it.
+#[derive(Clone, Debug)]
+struct TeamSlot {
+    mtime: f64,
+    panes: IndexMap<String, String>,
+}
+
+/// Per-file metadata caches that turn repeated resolutions into a single stat
+/// when a file is unchanged. Owned by the caller; the resolving methods take
+/// `&mut self`. Iteration order is never observed — lookups are by path — but an
+/// ordered map keeps the internal state deterministic across runs.
+#[derive(Debug, Default)]
+pub struct LabelCache {
+    claude: IndexMap<PathBuf, ClaudeSlot>,
+    copilot: IndexMap<PathBuf, CopilotSlot>,
+    teams: IndexMap<String, TeamSlot>,
+}
+
+impl LabelCache {
+    /// An empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve a session's `(title, agent_name, team, color)` for `agent`.
+    ///
+    /// `claude` reads the transcript at `transcript_path` (mtime-cached);
+    /// `copilot` reads `~/.copilot/session-state/<session_id>/workspace.yaml`
+    /// (mtime-cached). An empty `transcript_path` or any other agent returns the
+    /// all-empty result without touching the filesystem.
+    pub fn session_meta(
+        &mut self,
+        agent: &str,
+        transcript_path: &str,
+        session_id: &str,
+    ) -> SessionMeta {
+        match agent {
+            "claude" => self.claude_meta(transcript_path),
+            "copilot" => self.copilot_meta(session_id),
+            _ => SessionMeta::empty(),
+        }
+    }
+
+    /// Resolve a Claude session, keyed on the transcript's float-seconds mtime.
+    /// On a key hit the cached tuple is returned without re-reading; on a miss
+    /// the tail is scanned and folded onto the previous state so a field the
+    /// scan leaves empty keeps its prior value and a manual title survives a
+    /// later auto title. An empty path, or a transcript that cannot be stat-ed,
+    /// yields the all-empty result.
+    fn claude_meta(&mut self, transcript_path: &str) -> SessionMeta {
+        if transcript_path.is_empty() {
+            return SessionMeta::empty();
+        }
+        let path = Path::new(transcript_path);
+        let Some(mtime) = file_mtime_secs_f64(path) else {
+            return SessionMeta::empty();
+        };
+        if let Some(slot) = self.claude.get(path) {
+            if slot.mtime == mtime {
+                return claude_meta_of(&slot.state);
+            }
+        }
+        let prev = self
+            .claude
+            .get(path)
+            .map(|slot| slot.state.clone())
+            .unwrap_or_default();
+        let state = resolve_claude_meta(scan_tail(path), &prev);
+        let meta = claude_meta_of(&state);
+        self.claude
+            .insert(path.to_path_buf(), ClaudeSlot { mtime, state });
+        meta
+    }
+
+    /// Resolve a Copilot session by `session_id` via its `workspace.yaml`. An
+    /// empty id yields the all-empty result without touching the filesystem.
+    fn copilot_meta(&mut self, session_id: &str) -> SessionMeta {
+        if session_id.is_empty() {
+            return SessionMeta::empty();
+        }
+        self.copilot_meta_at(&copilot_workspace_path(session_id))
+    }
+
+    /// Resolve a Copilot session's title from a `workspace.yaml` path, keyed on
+    /// the file's whole-nanosecond mtime. On a key hit the cached title is
+    /// returned without re-reading. On a miss the file is read and its title
+    /// resolved, keeping the previous title when the read yields none. A file
+    /// that cannot be stat-ed or read yields the all-empty result and leaves any
+    /// existing cache slot untouched.
+    fn copilot_meta_at(&mut self, path: &Path) -> SessionMeta {
+        let Some(mtime_ns) = file_mtime_ns(path) else {
+            return SessionMeta::empty();
+        };
+        if let Some(slot) = self.copilot.get(path) {
+            if slot.mtime_ns == mtime_ns {
+                return copilot_meta_of(&slot.title);
+            }
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return SessionMeta::empty();
+        };
+        let mut title = copilot_title_from_text(&text);
+        if title.is_empty() {
+            if let Some(slot) = self.copilot.get(path) {
+                title = slot.title.clone();
+            }
+        }
+        let meta = copilot_meta_of(&title);
+        self.copilot
+            .insert(path.to_path_buf(), CopilotSlot { mtime_ns, title });
+        meta
+    }
+
+    /// Map each tmux pane id to the color NAME assigned to the teammate occupying
+    /// it for one agent-teams team, read from
+    /// `<claude config dir>/teams/<team>/config.json`.
+    ///
+    /// The config's `members` array holds one entry per teammate; a member with
+    /// both a non-empty `tmuxPaneId` and a non-empty `color` contributes that
+    /// pane -> color-name mapping. An empty `team`, or a missing/unreadable/
+    /// malformed config, yields an empty map. The parse is keyed on the config's
+    /// float-seconds mtime, so repeated calls for an unchanged team return the
+    /// cached map without re-reading.
+    pub fn team_pane_colors(&mut self, team: &str) -> IndexMap<String, String> {
+        if team.is_empty() {
+            return IndexMap::new();
+        }
+        let cfg = crate::color::claude_dir()
+            .join("teams")
+            .join(team)
+            .join("config.json");
+        let Some(mtime) = file_mtime_secs_f64(&cfg) else {
+            return IndexMap::new();
+        };
+        if let Some(slot) = self.teams.get(team) {
+            if slot.mtime == mtime {
+                return slot.panes.clone();
+            }
+        }
+        let mut panes: IndexMap<String, String> = IndexMap::new();
+        if let Ok(text) = std::fs::read_to_string(&cfg) {
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                if let Some(members) = value.get("members").and_then(Value::as_array) {
+                    for m in members {
+                        let pane = m.get("tmuxPaneId").and_then(Value::as_str).unwrap_or("");
+                        let color = m.get("color").and_then(Value::as_str).unwrap_or("");
+                        if !pane.is_empty() && !color.is_empty() {
+                            panes.insert(pane.to_string(), color.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        self.teams.insert(
+            team.to_string(),
+            TeamSlot {
+                mtime,
+                panes: panes.clone(),
+            },
+        );
+        panes
+    }
+}
+
+/// Project a Claude state onto the four public label fields (its `is_custom`
+/// bookkeeping flag is internal).
+fn claude_meta_of(state: &ClaudeMetaState) -> SessionMeta {
+    SessionMeta {
+        title: state.title.clone(),
+        agent_name: state.agent.clone(),
+        team: state.team.clone(),
+        color: state.color.clone(),
+    }
+}
+
+/// A Copilot title as the four public label fields; Copilot carries no teammate
+/// name, team, or color here.
+fn copilot_meta_of(title: &str) -> SessionMeta {
+    SessionMeta {
+        title: title.to_string(),
+        ..SessionMeta::empty()
+    }
+}
+
+/// The `workspace.yaml` path for a Copilot session id under `$HOME`.
+fn copilot_workspace_path(session_id: &str) -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join(".copilot")
+        .join("session-state")
+        .join(session_id)
+        .join("workspace.yaml")
+}
+
+/// A file's modification time as float seconds since the epoch, or `None` if it
+/// cannot be stat-ed or predates the epoch.
+fn file_mtime_secs_f64(path: &Path) -> Option<f64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.duration_since(UNIX_EPOCH).ok()?.as_secs_f64())
+}
+
+/// A file's modification time in whole nanoseconds since the epoch, or `None` if
+/// it cannot be stat-ed or predates the epoch.
+fn file_mtime_ns(path: &Path) -> Option<u128> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.duration_since(UNIX_EPOCH).ok()?.as_nanos())
+}
+
 // --- small byte/JSON helpers -------------------------------------------------
 
 /// Byte-subsequence containment (`needle` occurs contiguously in `haystack`).
@@ -610,5 +843,137 @@ mod tests {
             "real title"
         );
         assert_eq!(copilot_title_from_text(""), "");
+    }
+
+    /// Pin a file's mtime (and atime) to whole `secs` seconds, so a cache keyed
+    /// on mtime can be exercised deterministically instead of racing the clock.
+    fn set_mtime(path: &Path, secs: i64) {
+        use std::os::unix::ffi::OsStrExt;
+        let cpath = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let ts = libc::timespec {
+            tv_sec: secs,
+            tv_nsec: 0,
+        };
+        let times = [ts, ts];
+        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, cpath.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(rc, 0, "utimensat failed setting mtime");
+    }
+
+    fn write_at(path: &Path, body: &str, secs: i64) {
+        std::fs::write(path, body).unwrap();
+        set_mtime(path, secs);
+    }
+
+    fn ai_title_line(title: &str) -> String {
+        format!("{{\"type\":\"ai-title\",\"aiTitle\":\"{title}\"}}\n")
+    }
+
+    #[test]
+    fn claude_cache_hit_avoids_rescan_and_bump_triggers_it() {
+        let path = scratch_path("claude_cache");
+        write_at(&path, &ai_title_line("First"), 1000);
+
+        let mut cache = LabelCache::new();
+        assert_eq!(
+            cache
+                .session_meta("claude", path.to_str().unwrap(), "")
+                .title,
+            "First"
+        );
+
+        // New content but the same mtime: a hit must return the cached title
+        // rather than reading the fresh "Second".
+        write_at(&path, &ai_title_line("Second"), 1000);
+        assert_eq!(
+            cache
+                .session_meta("claude", path.to_str().unwrap(), "")
+                .title,
+            "First",
+            "same mtime must not rescan"
+        );
+
+        // Bumping the mtime forces a rescan that picks up the new title.
+        set_mtime(&path, 2000);
+        assert_eq!(
+            cache
+                .session_meta("claude", path.to_str().unwrap(), "")
+                .title,
+            "Second",
+            "changed mtime must rescan"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn claude_cache_sticky_keeps_previous_on_empty_scan() {
+        let path = scratch_path("claude_sticky");
+        write_at(&path, &ai_title_line("Hello"), 1000);
+
+        let mut cache = LabelCache::new();
+        assert_eq!(
+            cache
+                .session_meta("claude", path.to_str().unwrap(), "")
+                .title,
+            "Hello"
+        );
+
+        // A later revision with no title records, at a fresh mtime, rescans but
+        // must keep the previously-seen title rather than regressing to "".
+        write_at(&path, "{\"type\":\"other\"}\n", 2000);
+        assert_eq!(
+            cache
+                .session_meta("claude", path.to_str().unwrap(), "")
+                .title,
+            "Hello",
+            "empty scan must keep previous title"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn claude_empty_path_short_circuits() {
+        let mut cache = LabelCache::new();
+        assert_eq!(cache.session_meta("claude", "", ""), SessionMeta::empty());
+    }
+
+    #[test]
+    fn unknown_agent_is_empty() {
+        let mut cache = LabelCache::new();
+        assert_eq!(
+            cache.session_meta("mystery", "/some/path", "sid"),
+            SessionMeta::empty()
+        );
+    }
+
+    #[test]
+    fn copilot_cache_hit_bump_and_sticky() {
+        let path = scratch_path("copilot_cache");
+        write_at(&path, "name: Alpha\n", 1000);
+
+        let mut cache = LabelCache::new();
+        assert_eq!(cache.copilot_meta_at(&path).title, "Alpha");
+
+        // Same mtime with changed content: the cached title stands.
+        write_at(&path, "name: Beta\n", 1000);
+        assert_eq!(cache.copilot_meta_at(&path).title, "Alpha");
+
+        // Bumped mtime rescans to the new name.
+        set_mtime(&path, 2000);
+        assert_eq!(cache.copilot_meta_at(&path).title, "Beta");
+
+        // A fresh mtime whose content yields no title keeps the previous one.
+        write_at(&path, "name: ~\n", 3000);
+        assert_eq!(cache.copilot_meta_at(&path).title, "Beta");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn copilot_missing_file_is_empty_without_caching() {
+        let path = scratch_path("copilot_missing");
+        let mut cache = LabelCache::new();
+        assert_eq!(cache.copilot_meta_at(&path).title, "");
     }
 }

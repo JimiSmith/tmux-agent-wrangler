@@ -94,6 +94,8 @@ pub enum HookMsg {
         cwd: String,
         transcript: String,
         recoverable: Option<bool>,
+        /// The agent process id, or `None` when it could not be resolved.
+        pid: Option<u32>,
         /// A monotonic-per-session stamp, carried as a decimal string on the
         /// wire so its full 128-bit width round-trips exactly.
         #[serde(with = "i128_str")]
@@ -153,9 +155,7 @@ pub fn read_message<R: BufRead, M: DeserializeOwned>(r: &mut R) -> io::Result<Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{
-        Indicator, NamedColor, ProgressState, Row, RowKey, RowKind, SessionKey,
-    };
+    use crate::model::{Indicator, NamedColor, ProgressState, Row, RowKey, RowKind, SessionKey};
     use std::io::{BufReader, Cursor};
 
     /// Write `msg`, read it back from the resulting bytes, and assert the decoded
@@ -283,6 +283,7 @@ mod tests {
                 cwd: "/home/u/repo".into(),
                 transcript: "/home/u/.claude/x.jsonl".into(),
                 recoverable,
+                pid: Some(43_210),
                 token: 1_700_000_000_123_456_789i128,
             });
         }
@@ -299,6 +300,7 @@ mod tests {
             cwd: String::new(),
             transcript: String::new(),
             recoverable: None,
+            pid: None,
             token: -1i128,
         });
     }
