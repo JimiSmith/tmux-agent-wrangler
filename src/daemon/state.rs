@@ -35,6 +35,8 @@ pub struct ConnId(pub u64);
 /// `focus_key`) and `write_tty` are fire-and-forget effects.
 pub trait TmuxEnv {
     fn fetch_windows(&self, socket: &str) -> crate::tmux::FetchResult;
+    /// The real (non-sidebar) pane ids of one window, for the alone-sidebar check.
+    fn window_real_panes(&self, socket: &str, window: &str) -> Vec<PaneId>;
     fn ppid_map(&self) -> HashMap<u32, u32>;
     /// Read a global tmux option's raw value (untrimmed), empty when unset.
     fn option(&self, socket: &str, name: &str) -> String;
@@ -144,6 +146,17 @@ fn window_focus(window: &WindowId, windows: &[Window]) -> bool {
         Some(w) => w.active && w.panes.iter().all(|p| !p.active),
         None => false,
     }
+}
+
+/// Whether `window` still exists but holds no real panes (only its sidebar). A
+/// window that is gone entirely is not this: the sidebar's own pane is gone with
+/// it, so the client disconnects on its own.
+fn window_has_no_real_panes(window: &WindowId, windows: &[Window]) -> bool {
+    windows
+        .iter()
+        .find(|w| &w.id == window)
+        .map(|w| w.panes.is_empty())
+        .unwrap_or(false)
 }
 
 /// Resolve the shared selection against the rows just built: keep the current key
@@ -329,20 +342,31 @@ impl State {
                 self.poll_server(env, &server, &parents, &mut pushes);
             }
             InputEvent::Resize { cols } => {
-                if let Some(s) = self.servers.get_mut(&server) {
-                    s.width = Some(cols);
-                }
-                if let Some(c) = self.clients.get_mut(&conn) {
-                    c.cols = cols;
-                }
-                let others: Vec<ConnId> = self
-                    .clients
-                    .iter()
-                    .filter(|(id, c)| **id != conn && c.server == server)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for other in others {
-                    pushes.push((other, ServerMsg::Width { cols }));
+                // A sidebar alone in its window is expanding to fill the window,
+                // not a user width choice: tell it to exit and do not adopt or
+                // relay its width, so the other sidebars are not dragged wide.
+                let window = self.clients.get(&conn).map(|c| c.window.clone());
+                let alone = window
+                    .map(|w| env.window_real_panes(&server.0, &w.0).is_empty())
+                    .unwrap_or(false);
+                if alone {
+                    pushes.push((conn, ServerMsg::Exit));
+                } else {
+                    if let Some(s) = self.servers.get_mut(&server) {
+                        s.width = Some(cols);
+                    }
+                    if let Some(c) = self.clients.get_mut(&conn) {
+                        c.cols = cols;
+                    }
+                    let others: Vec<ConnId> = self
+                        .clients
+                        .iter()
+                        .filter(|(id, c)| **id != conn && c.server == server)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for other in others {
+                        pushes.push((other, ServerMsg::Width { cols }));
+                    }
                 }
             }
             // A terminal focus change is a wake only: the selection bar's owner is
@@ -483,7 +507,14 @@ impl State {
             .map(|(id, _)| *id)
             .collect();
         for conn in clients {
-            let has_focus = window_focus(&self.clients[&conn].window, &fetch.windows);
+            let window = self.clients[&conn].window.clone();
+            // A sidebar must never sit alone: when its window has lost every real
+            // pane, tell it to quit so its pane closes and tmux closes the window.
+            if window_has_no_real_panes(&window, &fetch.windows) {
+                pushes.push((conn, ServerMsg::Exit));
+                continue;
+            }
+            let has_focus = window_focus(&window, &fetch.windows);
             let model = RowModel {
                 rows: rows.clone(),
                 selection: selection.clone(),
@@ -602,6 +633,9 @@ impl TmuxEnv for RealTmux {
     fn fetch_windows(&self, socket: &str) -> crate::tmux::FetchResult {
         crate::tmux::fetch_windows(socket)
     }
+    fn window_real_panes(&self, socket: &str, window: &str) -> Vec<PaneId> {
+        crate::tmux::window_real_panes(socket, window)
+    }
     fn ppid_map(&self) -> HashMap<u32, u32> {
         crate::daemon::assoc::ppid_map()
     }
@@ -687,6 +721,13 @@ mod tests {
     impl TmuxEnv for FakeTmux {
         fn fetch_windows(&self, socket: &str) -> FetchResult {
             self.fetch.get(socket).cloned().unwrap_or_default()
+        }
+        fn window_real_panes(&self, socket: &str, window: &str) -> Vec<PaneId> {
+            self.fetch
+                .get(socket)
+                .and_then(|f| f.windows.iter().find(|w| w.id.0 == window))
+                .map(|w| w.panes.iter().map(|p| p.id.clone()).collect())
+                .unwrap_or_default()
         }
         fn ppid_map(&self) -> HashMap<u32, u32> {
             self.parents.clone()
@@ -892,6 +933,44 @@ mod tests {
     }
 
     #[test]
+    fn resize_from_an_alone_sidebar_exits_and_does_not_relay() {
+        // A window with a real pane (%1) plus a second window's client sharing the
+        // server. When the sidebar of an emptied window reports a resize, it must
+        // be told to exit and its width must not reach the other client.
+        let socket = "/s";
+        let windows = "@1\t0\tmain\t1\n@2\t1\tside\t0".to_string();
+        // @1 has a real pane; @2 has none (its sidebar is alone).
+        let panes = "@1\t%1\t0\t1\t\t\t\t2\t/home/x\tt".to_string();
+        let env = FakeTmux::default().with_windows(socket, &windows, &panes);
+        let mut state = State::new();
+        // conn 0 is the healthy window @1; conn 1 is the emptied window @2.
+        state.on_hello(
+            &env,
+            ConnId(0),
+            ServerKey("/s".into()),
+            WindowId("@1".into()),
+            PaneId("%8".into()),
+            30,
+        );
+        state.on_hello(
+            &env,
+            ConnId(1),
+            ServerKey("/s".into()),
+            WindowId("@2".into()),
+            PaneId("%9".into()),
+            30,
+        );
+
+        let pushes = state.on_input(&env, ConnId(1), InputEvent::Resize { cols: 200 });
+        assert_eq!(pushes, vec![(ConnId(1), ServerMsg::Exit)]);
+        // No width was adopted, so the healthy client is never dragged wide.
+        assert_eq!(state.servers[&ServerKey("/s".into())].width, None);
+        assert!(!pushes
+            .iter()
+            .any(|(_, m)| matches!(m, ServerMsg::Width { .. })));
+    }
+
+    #[test]
     fn new_client_adopts_the_servers_width() {
         let env = env_for(true);
         let mut state = State::new();
@@ -921,6 +1000,25 @@ mod tests {
         assert_eq!(
             *env.focuses.borrow(),
             vec![("@1".to_string(), Some("%1".to_string()))]
+        );
+    }
+
+    #[test]
+    fn sidebar_alone_in_its_window_is_told_to_exit() {
+        // A window that lists no real panes (only the sidebar) yields an Exit for
+        // its client instead of a Render.
+        let socket = "/s";
+        let windows = "@1\t0\tmain\t1".to_string();
+        // No pane lines: window @1 has no real panes.
+        let env = FakeTmux::default().with_windows(socket, &windows, "");
+        let mut state = State::new();
+        let pushes = hello_client(&mut state, &env, 0);
+        assert_eq!(pushes.first().map(|(_, m)| m), Some(&ServerMsg::Exit));
+        assert!(
+            !pushes
+                .iter()
+                .any(|(_, m)| matches!(m, ServerMsg::Render(_))),
+            "an alone sidebar gets no render"
         );
     }
 

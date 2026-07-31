@@ -536,6 +536,8 @@ fn event_loop(
                         resize_pane(&ctx.server.0, &ctx.pane.0, w);
                     }
                 }
+                // The window has no real panes left; quit so the pane closes.
+                Ok(Incoming::Msg(ServerMsg::Exit)) => return Ok(()),
                 Ok(Incoming::Closed) | Err(TryRecvError::Disconnected) => {
                     let (cols, rows) = terminal_size().unwrap_or((32, 24));
                     match connect(ctx, cols, rows) {

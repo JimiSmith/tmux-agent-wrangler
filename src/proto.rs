@@ -74,12 +74,14 @@ pub enum ClientMsg {
 /// A message the daemon pushes back to a sidebar client. `Render` carries the
 /// per-window row model the client paints; `Width` carries the shared column
 /// width another of the server's sidebars was resized to, for this client to
-/// adopt.
+/// adopt; `Exit` tells the client to quit so its pane closes (its window has no
+/// real panes left, so the sidebar must not sit there alone).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg {
     Render(RowModel),
     Width { cols: u16 },
+    Exit,
 }
 
 /// A message an agent lifecycle hook sends inward. `server` and `pane` are absent
@@ -283,6 +285,11 @@ mod tests {
     #[test]
     fn server_width_round_trips() {
         round_trip(&ServerMsg::Width { cols: 28 });
+    }
+
+    #[test]
+    fn server_exit_round_trips() {
+        round_trip(&ServerMsg::Exit);
     }
 
     /// A line written as each concrete inbound message decodes back to the
