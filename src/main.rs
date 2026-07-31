@@ -11,8 +11,9 @@ fn main() -> ExitCode {
     match args.get(1).map(String::as_str) {
         Some("hook") => wrangler::hook::run(&args[2..]),
         Some("daemon") => wrangler::daemon::run(),
+        Some("client") => wrangler::client::run(),
         // Wired up in later integration stages.
-        Some(cmd @ ("client" | "toggle" | "focus" | "spawn" | "install-hooks" | "tmux-entry")) => {
+        Some(cmd @ ("toggle" | "focus" | "spawn" | "install-hooks" | "tmux-entry")) => {
             eprintln!("wrangler: '{cmd}' is not implemented yet");
             exit(2);
         }

@@ -4,6 +4,7 @@ pub mod model;
 pub mod paths;
 pub mod platform;
 
+pub mod client;
 pub mod color;
 pub mod daemon;
 pub mod hook;

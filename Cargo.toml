@@ -12,3 +12,5 @@ serde_json = "1"
 indexmap = { version = "2", features = ["serde"] }
 # Liveness probe for a recorded agent pid via kill(pid, 0).
 libc = "0.2"
+# The client's terminal UI (bundles crossterm as ratatui::crossterm).
+ratatui = "0.30"
