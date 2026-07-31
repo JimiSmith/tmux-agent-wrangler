@@ -30,8 +30,9 @@ still holds.
   file.
 - **client** (ratatui + crossterm, one per window sidebar pane). Thin: connects
   to the daemon socket, sends `Hello{window,pane,size}`; receives a `RowModel`
-  for its window and paints it; animates the spinner locally; sends input
-  (nav/click/resize/focus) back. No tmux calls, no state files, no polling. The
+  for its window and paints it; animates the spinner locally; sends input back
+  (it resolves an up/down keypress or click to an absolute selection key itself,
+  plus activate, resize, and focus). No tmux calls, no state files, no polling. The
   render path is the existing prototype.
 - **hook** (`wrangler hook`, replacing `agent-hook.sh`). Parses the hook JSON on
   stdin, sends one `HookEvent` to the daemon, exits. No file writes. If the
@@ -116,9 +117,9 @@ src/proto.rs       WIRE protocol (client<->daemon, hook->daemon, ctl->daemon):
                    message enums + newline-delimited JSON framing. Hello,
                    HookEvent, and ctl messages carry the sender's tmux server
                    socket (from $TMUX) so the daemon can scope state and target
-                   tmux commands per server. AND the registry snapshot
-                   serialize/parse, including the legacy 2-field read. NOT the
-                   old marker/selection/width files.
+                   tmux commands per server. The registry snapshot
+                   serialize/parse and the numeric-field/session-id helpers live
+                   in daemon/assoc.rs, not here.
 src/color.rs       palette tables + rgb_to_ansi256 + read_theme + theme_palette.
                    Pure; the curses pair allocation moves into client terminal
                    setup as a crossterm equivalent.
@@ -131,7 +132,8 @@ src/daemon/
   mod.rs           socket server, per-client registry, always-on singleton,
                    the event loop, the global poll, push/diff, self-exit rules.
   state.rs         authoritative model assembly; build_rows -> semantic RowModel.
-  assoc.rs         ppid_map, process_under, parse_registry_record, the two-pass
+  assoc.rs         ppid_map, process_under, parse/serialize_registry_record,
+                   parse_field_int, the session-id helper, and the two-pass
                    association (now over the in-memory registry + one snapshot).
   rows.rs          build_rows, indicator_for, semantic row construction.
   notify.rs        in-memory attention dedup, bell, OSC 777/9 escapes, tty write.
@@ -160,11 +162,13 @@ src/glue/          tmux-entry (bindings, hooks, automatic-rename guard),
   a `RowModel` pushed over the wire; the client paints it. This matches the
   prototype's split: the daemon sends a semantic `Indicator`, the client resolves
   the spinner frame and `fit` at paint time.
-- **proto.rs** — WF1 proto spec applies *partially*. Keep: registry record
-  serialize/parse (current format only), session-id/key helpers, `parse_field_int`
-  (the ASCII-isdigit gate), and ns-token minting. Drop: marker read/write,
-  selection tab-framing, the flock `claim_attention`, `prune_notified`. Add
-  (new): the socket message enum and framing.
+- **proto.rs** — WF1 proto spec applies *partially*. proto.rs is now just the
+  socket message enum and its newline-delimited JSON framing. The registry record
+  serialize/parse (current format only), the session-id/key helpers, and
+  `parse_field_int` (the ASCII-isdigit gate) live in daemon/assoc.rs; ns-token
+  minting lands in hook.rs (see hook.rs below). Dropped entirely: marker
+  read/write, selection tab-framing, the flock `claim_attention`,
+  `prune_notified`.
 - **notify.rs** — the *when to signal*, dedup semantics, and bell/OSC escape
   building from the WF1 notify spec apply, but the cross-process flock dedup
   collapses to one in-memory map, because there is now a single daemon. The tty
@@ -173,10 +177,16 @@ src/glue/          tmux-entry (bindings, hooks, automatic-rename guard),
   is daemon state, not a file. The user-resize vs relayout vs own-request
   distinction stays client-side (the client owns its real size) and is reported
   to the daemon, which holds and broadcasts the target.
-- **hook.rs** — the WF1 hook spec's payload parsing, event normalization,
-  session-id sanitize, and recoverable-Copilot rule apply, but the *output* is a
-  socket `HookEvent`, not registry/marker file writes. The ps ancestry walk that
-  finds the agent pid moves to the daemon, which owns the registry.
+- **hook.rs** — the WF1 hook spec's payload parsing, event normalization
+  (including resolving `error` to working or attention per the agent's
+  recoverable flag), session-id sanitize, the recoverable-Copilot rule, and
+  ns-token minting (a `time_ns()` stamp per event, populating `HookMsg.token`)
+  apply, but the *output* is a socket `HookEvent`, not registry/marker file
+  writes. The hook resolves the agent pid by a ps ancestry walk (it is a
+  descendant of the agent process, so it is the one positioned to find it) and
+  sends it in `HookEvent`; the daemon prunes a session whose pid is dead. This
+  pid field on `HookEvent` and the hook's walk are added with the daemon's
+  pruning in the daemon stage.
 - **glue** — the WF1 glue/install-hooks spec applies unchanged (install-hooks
   JSON parity, tmux bindings/hooks/rename guard). toggle/focus/spawn now route
   through the daemon.
