@@ -8,7 +8,7 @@ name: build-binaries
 
 on:
   push:
-    branches: [main, rust-rewrite-prototype]
+    branches: [main]
   workflow_dispatch:
 
 # Creating the per-SHA release and its tag needs write access to the repo.
