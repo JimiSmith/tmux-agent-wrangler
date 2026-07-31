@@ -26,11 +26,12 @@ fi
 # Binary missing or stale. Build it with cargo if available. The build runs
 # backgrounded via run-shell -b so a first-time compile never blocks tmux
 # startup; tmux-entry (key binds, hooks, daemon) runs once the binary exists.
-# Until then the toggle/focus keys are simply unbound.
+# Until then the toggle/focus keys are simply unbound. --replace-daemon makes
+# the freshly built binary evict any daemon still running the old code.
 if command -v cargo >/dev/null 2>&1; then
   build_log="${TMPDIR:-/tmp}/wrangler-build.log"
   tmux display-message "wrangler: building with cargo (first run), sidebar available shortly..."
-  tmux run-shell -b "if cd '$CURRENT_DIR' && cargo build --release >'$build_log' 2>&1; then '$CURRENT_DIR/target/release/wrangler' tmux-entry; else tmux display-message 'wrangler: cargo build failed (see $build_log)'; fi"
+  tmux run-shell -b "if cd '$CURRENT_DIR' && cargo build --release >'$build_log' 2>&1; then '$CURRENT_DIR/target/release/wrangler' tmux-entry --replace-daemon; else tmux display-message 'wrangler: cargo build failed (see $build_log)'; fi"
   exit 0
 fi
 

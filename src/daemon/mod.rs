@@ -15,6 +15,7 @@ pub mod state;
 
 use std::io::BufReader;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
@@ -24,7 +25,7 @@ use indexmap::IndexMap;
 
 use crate::daemon::state::{ConnId, RealTmux, State, TmuxEnv};
 use crate::model::ServerKey;
-use crate::paths::{daemon_socket, state_dir};
+use crate::paths::{daemon_pidfile, daemon_socket, state_dir};
 use crate::proto::{read_message, write_message, ClientMsg, CtlMsg, HookMsg, Inbound, ServerMsg};
 
 /// The interval between full tmux polls.
@@ -48,14 +49,27 @@ enum Bind {
 
 /// Bind the daemon socket, or determine that another daemon already owns it. An
 /// `AddrInUse` error is disambiguated by connecting: a successful connect means a
-/// live daemon (yield to it); a refused one means a stale socket file, which is
-/// removed and rebound.
-fn bind_singleton(path: &std::path::Path) -> Bind {
+/// live daemon; a refused one means a stale socket file, which is removed and
+/// rebound.
+///
+/// `replace` (set when started from a freshly built binary) evicts a live
+/// incumbent instead of yielding to it: the recorded pid is killed and its socket
+/// reclaimed once it exits. An incumbent with no recorded pid (one from before
+/// pidfiles) cannot be targeted, so it is left running rather than orphaned by
+/// rebinding over it; the next update replaces cleanly, since this daemon records
+/// its pid.
+fn bind_singleton(path: &Path, replace: bool) -> Bind {
     match UnixListener::bind(path) {
         Ok(l) => Bind::Listener(l),
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             if UnixStream::connect(path).is_ok() {
-                return Bind::AlreadyRunning;
+                if !replace {
+                    return Bind::AlreadyRunning;
+                }
+                match read_pidfile() {
+                    Some(pid) => evict(pid, path),
+                    None => return Bind::AlreadyRunning,
+                }
             }
             let _ = std::fs::remove_file(path);
             match UnixListener::bind(path) {
@@ -65,6 +79,40 @@ fn bind_singleton(path: &std::path::Path) -> Bind {
         }
         Err(_) => Bind::Failed,
     }
+}
+
+/// The pid recorded by the running daemon, or `None` if unreadable/unparseable.
+fn read_pidfile() -> Option<i32> {
+    std::fs::read_to_string(daemon_pidfile())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Kill the incumbent daemon and wait for it to release the socket so the caller
+/// can rebind. Escalates to `SIGKILL` if it does not exit under `SIGTERM`.
+fn evict(pid: i32, path: &Path) {
+    // Safe: kill only inspects/signals the pid; an invalid or dead pid is a
+    // harmless error we ignore.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    if wait_socket_free(path) {
+        return;
+    }
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    wait_socket_free(path);
+}
+
+/// Poll until the socket refuses connections (the incumbent is gone), up to two
+/// seconds. Returns whether it became free.
+fn wait_socket_free(path: &Path) -> bool {
+    for _ in 0..100 {
+        if UnixStream::connect(path).is_err() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
 }
 
 /// Accept connections forever, assigning each an id in accept order. A write
@@ -205,16 +253,20 @@ fn core_loop(rx: mpsc::Receiver<Event>) {
 
 /// The daemon entry point: become the singleton, then serve until killed. Exits 0
 /// when another daemon already owns the socket (the always-on invariant is
-/// already met).
-pub fn run() -> ExitCode {
+/// already met). `replace` evicts a live incumbent rather than yielding to it,
+/// so a rebuilt binary takes over from the old one.
+pub fn run(replace: bool) -> ExitCode {
     let socket = daemon_socket();
     let _ = std::fs::create_dir_all(state_dir());
 
-    let listener = match bind_singleton(&socket) {
+    let listener = match bind_singleton(&socket, replace) {
         Bind::Listener(l) => l,
         Bind::AlreadyRunning => return ExitCode::SUCCESS,
         Bind::Failed => return ExitCode::from(1),
     };
+
+    // Record our pid so a later `daemon --replace` can find and evict us.
+    let _ = std::fs::write(daemon_pidfile(), std::process::id().to_string());
 
     let (tx, rx) = mpsc::channel::<Event>();
     spawn_acceptor(listener, tx.clone());
@@ -222,5 +274,6 @@ pub fn run() -> ExitCode {
     core_loop(rx);
 
     let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(daemon_pidfile());
     ExitCode::SUCCESS
 }

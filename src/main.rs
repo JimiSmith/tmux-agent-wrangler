@@ -8,11 +8,12 @@ const USAGE: &str =
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
+    let has = |flag: &str| args[2..].iter().any(|a| a == flag);
     match args.get(1).map(String::as_str) {
         Some("hook") => wrangler::hook::run(&args[2..]),
-        Some("daemon") => wrangler::daemon::run(),
+        Some("daemon") => wrangler::daemon::run(has("--replace")),
         Some("client") => wrangler::client::run(),
-        Some("tmux-entry") => wrangler::glue::tmux_entry(),
+        Some("tmux-entry") => wrangler::glue::tmux_entry(has("--replace-daemon")),
         Some("toggle") => wrangler::glue::toggle(),
         Some("focus") => wrangler::glue::focus(),
         Some("spawn") => wrangler::glue::spawn(&args[2..]),

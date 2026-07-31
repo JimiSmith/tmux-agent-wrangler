@@ -56,16 +56,23 @@ fn option_on(socket: &str, name: &str) -> bool {
 }
 
 /// Start the daemon detached, so it is up regardless of which key first ran.
-fn start_daemon(exe: &str) {
+/// `replace` makes it evict a running daemon (used after a rebuild so the new
+/// binary takes over) rather than yielding to it.
+fn start_daemon(exe: &str, replace: bool) {
     let mut command = Command::new(exe);
     command.arg("daemon");
+    if replace {
+        command.arg("--replace");
+    }
     crate::platform::spawn_detached(command);
 }
 
 /// The plugin entry point: bind the toggle/focus keys to this binary, install the
 /// new-window/break-pane spawn hooks and the automatic-rename guard, optionally
-/// install the agent hooks, and start the daemon.
-pub fn tmux_entry() -> ExitCode {
+/// install the agent hooks, and start the daemon. `replace_daemon` (set when the
+/// wrapper just rebuilt the binary) evicts a running daemon so the new build takes
+/// over.
+pub fn tmux_entry(replace_daemon: bool) -> ExitCode {
     let Some(socket) = server_socket() else {
         eprintln!("wrangler tmux-entry: not inside a tmux server");
         return ExitCode::from(2);
@@ -73,7 +80,7 @@ pub fn tmux_entry() -> ExitCode {
     let exe = exe_path();
     let quoted_exe = shlex_quote(&exe);
 
-    start_daemon(&exe);
+    start_daemon(&exe, replace_daemon);
 
     // Toggle and focus keys, bound with the prefix.
     let key = option_or(&socket, "@wrangler-key", "Tab");

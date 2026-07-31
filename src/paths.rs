@@ -21,3 +21,9 @@ pub fn state_dir() -> PathBuf {
 pub fn daemon_socket() -> PathBuf {
     state_dir().join("daemon.sock")
 }
+
+/// The file recording the running daemon's pid, so a `daemon --replace` started
+/// from a freshly built binary can find and evict the incumbent.
+pub fn daemon_pidfile() -> PathBuf {
+    state_dir().join("daemon.pid")
+}
