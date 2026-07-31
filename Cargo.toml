@@ -16,3 +16,8 @@ indexmap = { version = "2", features = ["serde"] }
 libc = "0.2"
 # The client's terminal UI (bundles crossterm as ratatui::crossterm).
 ratatui = "0.30"
+
+[profile.release]
+# Strip symbols so the prebuilt binaries (and local release builds) download and
+# ship roughly half the size.
+strip = true
