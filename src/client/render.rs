@@ -1,13 +1,19 @@
 //! Turning a row's structure into the line drawn for it.
 //!
 //! Every glyph the sidebar shows that is not the literal name of a thing is
-//! chosen here: the gutter marking where you are, the tree branches, the index
-//! prefix, the heading's spacing and case, and the styling. Nothing in this
+//! chosen here: the gutter marking where you are, the icon marking what kind of
+//! thing the row is, the tree branches, the index prefix, the heading's spacing
+//! and case, and the styling. Nothing in this
 //! module knows how the rows were grouped, so a window, a pane or an agent draws
 //! the same wherever it appears.
+//!
+//! A row is drawn as a run of [`Segment`]s rather than one styled line, which is
+//! what lets a pane's or agent's color sit on its icon alone while the name
+//! beside it stays in the terminal's default.
 
 use ratatui::style::Style;
 
+use crate::daemon::rows::fit;
 use crate::model::{Branch, NamedColor, RowContent};
 
 use super::Colors;
@@ -32,54 +38,162 @@ fn branch(branch: Branch) -> char {
     }
 }
 
-/// The opening of a child row: the gutter, the indent, and the branch. Its width
-/// does not depend on any of them, so the tree stays aligned.
-fn child_prefix(here: bool, position: Branch) -> String {
-    format!("{}  {}─ ", gutter(here), branch(position))
+/// Column 1: what kind of thing the row is. Nerd Font glyphs, one column wide.
+///
+/// This is the only thing distinguishing an agent from a plain pane: a child row
+/// draws its name in the terminal's default whatever color the thing carries, so
+/// color cannot be read as "this is an agent".
+const ICON_PANE: char = '\u{f489}';
+const ICON_AGENT: char = '\u{f167a}';
+
+/// A row's text, split so a color can land on the kind icon alone.
+enum Parts {
+    /// One undivided line: a heading, a blank, or a window row, which has no
+    /// icon column of its own.
+    Whole(String),
+    /// A child row, carrying the color its icon is drawn in.
+    Split {
+        head: String,
+        icon: char,
+        tail: String,
+        color: Option<NamedColor>,
+    },
 }
 
-/// The line drawn for a row, before it is fitted to the pane width.
-pub fn row_text(content: &RowContent) -> String {
+/// A child row's pieces: the gutter, its kind icon, then the branch, index and
+/// name. What precedes the name is the same width whatever the branch and icon
+/// are, so the tree stays aligned.
+fn child_parts(
+    here: bool,
+    icon: char,
+    position: Branch,
+    index: &str,
+    name: &str,
+    color: Option<NamedColor>,
+) -> Parts {
+    Parts::Split {
+        head: gutter(here).to_string(),
+        icon,
+        tail: format!(" {}─ {index}: {name}", branch(position)),
+        color,
+    }
+}
+
+/// Split a row into the pieces it is drawn as.
+fn parts(content: &RowContent) -> Parts {
     match content {
         // The single leading space is load-bearing: it aligns the underline.
-        RowContent::Header { text } => format!(" {}", text.to_uppercase()),
-        RowContent::Blank => String::new(),
+        RowContent::Header { text } => Parts::Whole(format!(" {}", text.to_uppercase())),
+        RowContent::Blank => Parts::Whole(String::new()),
         RowContent::Window {
             index,
             name,
             active,
             ..
-        } => format!("{} {index}: {name}", gutter(*active)),
+        } => Parts::Whole(format!("{} {index}: {name}", gutter(*active))),
         RowContent::Pane {
             index,
             title,
             branch,
             here,
-            ..
-        } => format!("{}{index}: {title}", child_prefix(*here, *branch)),
+            color,
+        } => child_parts(*here, ICON_PANE, *branch, index, title, *color),
         RowContent::Agent {
             index,
             label,
             branch,
             here,
-            ..
-        } => format!("{}{index}: {label}", child_prefix(*here, *branch)),
+            color,
+        } => child_parts(*here, ICON_AGENT, *branch, index, label, *color),
     }
 }
 
-/// The base style for a row from its content, before the selection bar is
-/// applied.
+/// The line drawn for a row, before it is fitted to the pane width.
+pub fn row_text(content: &RowContent) -> String {
+    match parts(content) {
+        Parts::Whole(text) => text,
+        Parts::Split {
+            head, icon, tail, ..
+        } => format!("{head}{icon}{tail}"),
+    }
+}
+
+/// One piece of a drawn row: its text and the style that piece carries.
+pub struct Segment {
+    pub text: String,
+    pub style: Style,
+}
+
+/// The styled pieces a row is drawn as, before they are fitted to the pane
+/// width.
 ///
-/// The two channels are kept apart: weight says where you are, and color says
-/// *which* window or agent a row belongs to. Nothing here varies with a row's
-/// turn state, which the indicator carries on its own.
+/// A child's color rides on its icon alone. A whole row in an agent's color
+/// drowns the list once more than a couple of agents are up, and the icon is
+/// enough to tie the row to the thing it points at.
+pub fn row_segments(content: &RowContent, colors: &Colors) -> Vec<Segment> {
+    let base = base_style(content, colors);
+    match parts(content) {
+        Parts::Whole(text) => vec![Segment { text, style: base }],
+        Parts::Split {
+            head,
+            icon,
+            tail,
+            color,
+        } => vec![
+            Segment {
+                text: head,
+                style: base,
+            },
+            Segment {
+                text: icon.to_string(),
+                style: own_color(base, colors, color),
+            },
+            Segment {
+                text: tail,
+                style: base,
+            },
+        ],
+    }
+}
+
+/// Fit a row's segments to `field` columns, truncating or padding the line as a
+/// whole.
+///
+/// Only the tail of the line moves, so a truncated segment empties from the
+/// right and the padding lands on the last segment — which is what makes the
+/// selection bar span the full width rather than stopping at the name.
+pub fn fit_segments(segments: Vec<Segment>, field: usize) -> Vec<Segment> {
+    let joined: String = segments.iter().map(|s| s.text.as_str()).collect();
+    let fitted = fit(&joined, field);
+    let mut chars = fitted.chars();
+    let mut out: Vec<Segment> = segments
+        .into_iter()
+        .map(|seg| Segment {
+            text: chars.by_ref().take(seg.text.chars().count()).collect(),
+            style: seg.style,
+        })
+        .collect();
+    let padding: String = chars.collect();
+    if let Some(last) = out.last_mut() {
+        last.text.push_str(&padding);
+    }
+    out
+}
+
+/// The style a row's own text draws in, which the right-edge indicator inherits
+/// when it carries no state color of its own.
+///
+/// The channels are kept apart: weight says where you are, and the kind icon
+/// says what the row is. A child's color is deliberately absent here — it
+/// belongs to the icon, not the name — so only a window row styles its whole
+/// line with a color. Nothing here varies with a row's turn state, which the
+/// indicator carries on its own.
 pub fn base_style(content: &RowContent, colors: &Colors) -> Style {
     match content {
         RowContent::Header { .. } => Style::new().bold().underlined(),
         RowContent::Blank => Style::new().dim(),
         RowContent::Window { active, color, .. } => own_color(weight(*active), colors, *color),
-        RowContent::Pane { here, color, .. } => own_color(weight(*here), colors, *color),
-        RowContent::Agent { here, color, .. } => weight(*here).fg(colors.agent(*color)),
+        RowContent::Pane { here, .. } | RowContent::Agent { here, .. } => weight(*here),
     }
 }
 
@@ -92,8 +206,7 @@ fn weight(here: bool) -> Style {
     }
 }
 
-/// Apply a window/pane's own color, leaving the style untouched when it has
-/// none.
+/// Apply a thing's own color, leaving the style untouched when it has none.
 fn own_color(style: Style, colors: &Colors, color: Option<NamedColor>) -> Style {
     match colors.optional(color) {
         Some(c) => style.fg(c),
@@ -135,6 +248,16 @@ mod tests {
         }
     }
 
+    fn colored_agent(color: NamedColor) -> RowContent {
+        RowContent::Agent {
+            index: "0".to_string(),
+            label: "a".to_string(),
+            branch: Branch::Last,
+            here: false,
+            color: Some(color),
+        }
+    }
+
     fn is_bold(content: &RowContent, colors: &Colors) -> bool {
         base_style(content, colors)
             .add_modifier
@@ -151,21 +274,25 @@ mod tests {
     fn a_child_row_is_indented_under_its_window() {
         assert_eq!(
             row_text(&pane("0", "nvim", Branch::More, false)),
-            "   ├─ 0: nvim"
+            " \u{f489} ├─ 0: nvim"
         );
         assert_eq!(
             row_text(&pane("1", "bash", Branch::Last, true)),
-            "▌  └─ 1: bash"
+            "▌\u{f489} └─ 1: bash"
         );
     }
 
     #[test]
     fn a_pane_and_an_agent_land_in_the_same_columns() {
         // Swapping which of a window's panes runs an agent must not shift the
-        // tree, so the two forms differ only in the name they carry.
+        // tree, so the two forms differ only in the icon and the name.
+        let pane_row = row_text(&pane("0", "name", Branch::Last, true));
+        let agent_row = row_text(&agent("0", "name", Branch::Last, true));
+        assert_ne!(pane_row, agent_row);
+        assert_eq!(pane_row.chars().count(), agent_row.chars().count());
         assert_eq!(
-            row_text(&pane("0", "name", Branch::Last, true)),
-            row_text(&agent("0", "name", Branch::Last, true))
+            pane_row.replace(ICON_PANE, ""),
+            agent_row.replace(ICON_AGENT, "")
         );
     }
 
@@ -190,22 +317,67 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_row_is_always_colored_and_a_pane_row_only_when_it_has_one() {
+    fn a_childs_color_lands_on_its_icon_and_nowhere_else() {
         let colors = Colors::new();
-        // An agent with no color of its own still gets the theme's agent color.
-        assert!(base_style(&agent("0", "a", Branch::Last, false), &colors)
-            .fg
-            .is_some());
-        assert!(base_style(&pane("0", "p", Branch::Last, false), &colors)
-            .fg
-            .is_none());
-        let colored = RowContent::Pane {
-            index: "0".to_string(),
-            title: "p".to_string(),
-            branch: Branch::Last,
-            here: false,
+        let segments = row_segments(&colored_agent(NamedColor::Cyan), &colors);
+        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, vec![" ", "\u{f167a}", " └─ 0: a"]);
+        assert!(segments[1].style.fg.is_some(), "the icon carries the color");
+        assert!(segments[0].style.fg.is_none());
+        assert!(segments[2].style.fg.is_none(), "the name stays default");
+    }
+
+    #[test]
+    fn a_child_with_no_color_draws_entirely_in_the_default() {
+        let colors = Colors::new();
+        for content in [
+            agent("0", "a", Branch::Last, false),
+            pane("0", "p", Branch::Last, false),
+        ] {
+            for segment in row_segments(&content, &colors) {
+                assert!(segment.style.fg.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_row_is_drawn_as_one_colored_piece() {
+        // A window has no icon column, so its color stays on the whole line.
+        let colors = Colors::new();
+        let content = RowContent::Window {
+            index: "1".to_string(),
+            name: "w".to_string(),
+            active: false,
             color: Some(NamedColor::Red),
         };
-        assert!(base_style(&colored, &colors).fg.is_some());
+        let segments = row_segments(&content, &colors);
+        assert_eq!(segments.len(), 1);
+        assert!(segments[0].style.fg.is_some());
+    }
+
+    #[test]
+    fn fitting_pads_the_last_segment_and_empties_the_others_from_the_right() {
+        let colors = Colors::new();
+        let segments = row_segments(&agent("0", "a", Branch::Last, false), &colors);
+        let width = row_text(&agent("0", "a", Branch::Last, false))
+            .chars()
+            .count();
+
+        let padded = fit_segments(
+            row_segments(&agent("0", "a", Branch::Last, false), &colors),
+            width + 3,
+        );
+        let texts: Vec<String> = padded.iter().map(|s| s.text.clone()).collect();
+        assert_eq!(texts[0], " ", "the gutter is untouched");
+        assert_eq!(texts[1], "\u{f167a}", "the icon keeps its own segment");
+        assert!(
+            texts[2].ends_with("   "),
+            "padding lands on the last segment"
+        );
+
+        // Narrower than the prefix: the tail empties, the head is what survives.
+        let cut = fit_segments(segments, 2);
+        assert_eq!(cut.iter().map(|s| s.text.chars().count()).sum::<usize>(), 2);
+        assert_eq!(cut[2].text, "");
     }
 }

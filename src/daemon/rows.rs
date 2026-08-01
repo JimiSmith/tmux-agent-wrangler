@@ -767,7 +767,11 @@ mod tests {
         let texts: Vec<String> = rows.iter().map(|r| row_text(&r.content)).collect();
         assert_eq!(
             texts,
-            vec!["▌ 1: editor", "▌  ├─ 1: nvim", "   └─ 2: Fix the bug"]
+            vec![
+                "▌ 1: editor",
+                "▌\u{f489} ├─ 1: nvim",
+                " \u{f167a} └─ 2: Fix the bug"
+            ]
         );
 
         assert_eq!(
@@ -835,10 +839,10 @@ mod tests {
             texts,
             vec![
                 "▌ 1: one",
-                "▌  └─ 1: Fix the bug",
+                "▌\u{f167a} └─ 1: Fix the bug",
                 // No gutter anywhere in @2: its active pane is not where you are.
                 "  2: two",
-                "   └─ 1: Fix the bug",
+                " \u{f167a} └─ 1: Fix the bug",
             ]
         );
         // The pane in the id is what keeps the two rows separately selectable.
@@ -862,7 +866,7 @@ mod tests {
         // The window heading still marks itself; no pane claims to be where you
         // are.
         let texts: Vec<String> = rows.iter().map(|r| row_text(&r.content)).collect();
-        assert_eq!(texts, vec!["▌ 1: editor", "   └─ 1: nvim"]);
+        assert_eq!(texts, vec!["▌ 1: editor", " \u{f489} └─ 1: nvim"]);
     }
 
     #[test]
@@ -887,7 +891,11 @@ mod tests {
         // pane's position among its window's panes.
         assert_eq!(
             texts,
-            vec!["▌ 1: editor", "   ├─ 1: first", "   └─ 1: second"]
+            vec![
+                "▌ 1: editor",
+                " \u{f167a} ├─ 1: first",
+                " \u{f167a} └─ 1: second"
+            ]
         );
     }
 
@@ -964,12 +972,12 @@ mod tests {
                 " WINDOWS",
                 "",
                 "▌ 1: editor",
-                "▌  └─ 1: claude",
+                "▌\u{f489} └─ 1: claude",
                 "",
                 " CLAUDE",
                 "",
                 "▌ 1: editor",
-                "▌  └─ 1: Fix the bug",
+                "▌\u{f167a} └─ 1: Fix the bug",
             ]
         );
     }

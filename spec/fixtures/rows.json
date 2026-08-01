@@ -1384,7 +1384,7 @@
         }
       },
       {
-        "text": "▌  ├─ 0: vim",
+        "text": "▌ ├─ 0: vim",
         "item": {
           "type": "pane",
           "key": [
@@ -1398,7 +1398,7 @@
         }
       },
       {
-        "text": "   └─ 1: shell",
+        "text": "  └─ 1: shell",
         "item": {
           "type": "pane",
           "key": [
@@ -1423,7 +1423,7 @@
         }
       },
       {
-        "text": "   └─ 0: tail",
+        "text": "  └─ 0: tail",
         "item": {
           "type": "pane",
           "key": [
@@ -1510,7 +1510,7 @@
         }
       },
       {
-        "text": "   └─ 0: sh",
+        "text": "  └─ 0: sh",
         "item": {
           "type": "pane",
           "key": [
@@ -1589,7 +1589,7 @@
         }
       },
       {
-        "text": "▌  └─ 0: claude",
+        "text": "▌ └─ 0: claude",
         "item": {
           "type": "pane",
           "key": [
@@ -1633,7 +1633,7 @@
         }
       },
       {
-        "text": "▌  └─ 0: @alice - Feature",
+        "text": "▌󱙺 └─ 0: @alice - Feature",
         "item": {
           "type": "agent",
           "key": [
@@ -1740,7 +1740,7 @@
         }
       },
       {
-        "text": "▌  └─ 0: a",
+        "text": "▌ └─ 0: a",
         "item": {
           "type": "pane",
           "key": [
@@ -1765,7 +1765,7 @@
         }
       },
       {
-        "text": "   └─ 0: b",
+        "text": "  └─ 0: b",
         "item": {
           "type": "pane",
           "key": [
@@ -1809,7 +1809,7 @@
         }
       },
       {
-        "text": "▌  └─ 0: claude session",
+        "text": "▌󱙺 └─ 0: claude session",
         "item": {
           "type": "agent",
           "key": [
@@ -1856,7 +1856,7 @@
         }
       },
       {
-        "text": "   └─ 0: cop session",
+        "text": " 󱙺 └─ 0: cop session",
         "item": {
           "type": "agent",
           "key": [
@@ -1963,7 +1963,7 @@
         }
       },
       {
-        "text": "▌  └─ 0: a",
+        "text": "▌ └─ 0: a",
         "item": {
           "type": "pane",
           "key": [
@@ -1988,7 +1988,7 @@
         }
       },
       {
-        "text": "   └─ 0: b",
+        "text": "  └─ 0: b",
         "item": {
           "type": "pane",
           "key": [
@@ -2032,7 +2032,7 @@
         }
       },
       {
-        "text": "▌  └─ 0: here",
+        "text": "▌󱙺 └─ 0: here",
         "item": {
           "type": "agent",
           "key": [
@@ -2061,7 +2061,7 @@
         }
       },
       {
-        "text": "   └─ 0: there",
+        "text": " 󱙺 └─ 0: there",
         "item": {
           "type": "agent",
           "key": [
@@ -2151,7 +2151,7 @@
         }
       },
       {
-        "text": "▌  ├─ 0: p1",
+        "text": "▌ ├─ 0: p1",
         "item": {
           "type": "pane",
           "key": [
@@ -2165,7 +2165,7 @@
         }
       },
       {
-        "text": "   ├─ 1: p2",
+        "text": "  ├─ 1: p2",
         "item": {
           "type": "pane",
           "key": [
@@ -2179,7 +2179,7 @@
         }
       },
       {
-        "text": "   └─ 2: p3",
+        "text": "  └─ 2: p3",
         "item": {
           "type": "pane",
           "key": [
@@ -2318,7 +2318,7 @@
         }
       },
       {
-        "text": "▌  └─ 0: a",
+        "text": "▌ └─ 0: a",
         "item": {
           "type": "pane",
           "key": [
@@ -2362,7 +2362,7 @@
         }
       },
       {
-        "text": "▌  └─ 0: busy",
+        "text": "▌󱙺 └─ 0: busy",
         "item": {
           "type": "agent",
           "key": [

@@ -138,8 +138,8 @@ runtime; the concurrency model is the same either way.
   windows, each with pane and agent children, every node carrying its progress
   indicator, its color and the row id the client echoes back. **It formats
   nothing.** A node's only text is the literal name of the thing — a window's
-  name, a pane's title, an agent's label — and the gutter, branches and index
-  prefix are the client's to compose. A pane hosting an agent contributes that
+  name, a pane's title, an agent's label — and the gutter, kind icon, branches
+  and index prefix are the client's to compose. A pane hosting an agent contributes that
   agent in place of itself; hosting two contributes two children.
   `ViewMode` selects the grouping only: unified (the default) is one unheaded
   block, and `@wrangler-sections` opts into the window tree followed by a block
@@ -161,11 +161,23 @@ runtime; the concurrency model is the same either way.
   resolve the selection, the client to paint — so nav order and paint order are
   the same order by construction.
 
-- **`client/render.rs`** — the only place a glyph is chosen. `row_text` composes
-  the `▌` gutter, the `├─`/`└─` branches, the index prefix and the heading's
-  spacing and case; `base_style` keeps the channels apart, with weight saying
-  where you are and color saying *which* window or agent, never which row is
-  live. Turn state is left entirely to the right-edge indicator.
+- **`client/render.rs`** — the only place a glyph is chosen. `parts` splits a row
+  into the `▌` gutter, the kind icon (`` pane, `󱙺` agent, Nerd Font glyphs one
+  column wide) and the rest — the `├─`/`└─` branches, the index prefix, the
+  heading's spacing and case. `row_text` concatenates that split (the daemon's
+  parity tests assert the line it yields) and `row_segments` styles it, which is
+  the split's reason to exist: **a child's color goes on its icon and nothing
+  else**, because a list of full-width colored rows is unreadable and the icon
+  alone ties a row to its thing. Only a window row, having no icon, colors its
+  whole line. `base_style` therefore carries weight (where you are) but no
+  child color; `fit_segments` fits the run to the pane width, emptying segments
+  from the right and padding the last one so the selection bar spans the width.
+  The bar (`selection_bar` in `client/mod.rs`) drops the color of everything it
+  covers: under reverse video a foreground color becomes the background, so a
+  colored icon or indicator would paint a block of color across the selected
+  row.
+  Turn state is left entirely to the right-edge indicator, which inherits
+  `base_style` when it has no state color of its own.
 
 - **`notify.rs`** — the bell (`@wrangler-bell`) and the desktop notification
   (`@wrangler-osc-notify`). Raised by the daemon off the poll, not by the hook,

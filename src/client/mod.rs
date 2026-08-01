@@ -35,9 +35,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 
-use crate::client::render::{base_style, row_text};
+use crate::client::render::{base_style, fit_segments, row_segments};
 use crate::color::{agent_color_table, claude_dir, read_theme};
-use crate::daemon::rows::{fit, StateColor};
+use crate::daemon::rows::StateColor;
 use crate::model::{NamedColor, PaneId, Row, RowKey, RowModel, ServerKey, WindowId};
 use crate::paths::daemon_socket;
 use crate::proto::{read_message, write_message, ClientMsg, CtlMsg, InputEvent, ServerMsg};
@@ -51,8 +51,7 @@ const CONNECT_RETRIES: u32 = 40;
 /// The pause between connect attempts while a freshly spawned daemon comes up.
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Name -> ansi color index, resolved once from the user's theme, plus the
-/// default agent color the same table supplies.
+/// Name -> ansi color index, resolved once from the user's theme.
 pub struct Colors {
     table: IndexMap<&'static str, i16>,
 }
@@ -71,16 +70,9 @@ impl Colors {
         Color::Indexed(idx as u8)
     }
 
-    /// A window/pane's own color, or `None` to leave it default-styled.
+    /// A row's own color, or `None` to leave it default-styled.
     fn optional(&self, color: Option<NamedColor>) -> Option<Color> {
         color.map(|c| self.named(c))
-    }
-
-    /// An agent row's color: its own, or the theme's cyan as the default.
-    fn agent(&self, color: Option<NamedColor>) -> Color {
-        color
-            .map(|c| self.named(c))
-            .unwrap_or(self.named(NamedColor::Cyan))
     }
 }
 
@@ -93,8 +85,24 @@ fn state_color(state: StateColor) -> Color {
     }
 }
 
-/// Render one row to a styled line: the text fit to the width with the indicator
-/// pinned to the right edge, and the reverse-video bar applied when selected.
+/// The reverse-video bar marking the selected row, applied to every span of it
+/// so the bar spans the whole width rather than the colored pieces alone.
+///
+/// The bar drops the color it covers: under reverse video a foreground color
+/// becomes the background, so a colored icon or indicator would paint a block of
+/// color across the bar. Reverse video already says which row is selected, and
+/// the weight and glyphs survive it.
+fn selection_bar(style: Style, selected: bool) -> Style {
+    if selected {
+        Style { fg: None, ..style }.add_modifier(Modifier::REVERSED)
+    } else {
+        style
+    }
+}
+
+/// Render one row to a styled line: its segments fit to the width with the
+/// indicator pinned to the right edge, and the reverse-video bar applied when
+/// selected.
 fn render_line(
     row: &Row,
     colors: &Colors,
@@ -102,37 +110,36 @@ fn render_line(
     frame: usize,
     selected: bool,
 ) -> Line<'static> {
-    let text = row_text(&row.content);
     let indicator = row.indicator;
-    let base = base_style(&row.content, colors);
+    let segments = row_segments(&row.content, colors);
     // Reserve the last column so the indicator never touches the pane edge.
     let field = width.saturating_sub(1);
     let (ind_text, ind_color) = indicator.resolve(frame);
     let ind_len = ind_text.chars().count();
 
-    if !ind_text.is_empty() && field >= ind_len + 2 {
+    let (left, tail) = if !ind_text.is_empty() && field >= ind_len + 2 {
         let reserve = ind_len + 1;
-        let left = fit(&text, field - reserve);
-        let mut left_style = base;
-        let mut ind_style = match ind_color {
+        // No state color of its own: the indicator inherits the row's style.
+        let ind_style = match ind_color {
             Some(c) => Style::new().fg(state_color(c)),
-            None => base,
+            None => base_style(&row.content, colors),
         };
-        if selected {
-            left_style = left_style.add_modifier(Modifier::REVERSED);
-            ind_style = ind_style.add_modifier(Modifier::REVERSED);
-        }
-        Line::from(vec![
-            Span::styled(left, left_style),
-            Span::styled(format!(" {ind_text}"), ind_style),
-        ])
+        (
+            fit_segments(segments, field - reserve),
+            Some(Span::styled(
+                format!(" {ind_text}"),
+                selection_bar(ind_style, selected),
+            )),
+        )
     } else {
-        let mut style = base;
-        if selected {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
-        Line::from(Span::styled(fit(&text, field), style))
-    }
+        (fit_segments(segments, field), None)
+    };
+
+    let spans = left
+        .into_iter()
+        .map(|s| Span::styled(s.text, selection_bar(s.style, selected)))
+        .chain(tail);
+    Line::from(spans.collect::<Vec<_>>())
 }
 
 /// A pushed model with its tree already flattened, so the paint loop walks the
@@ -630,7 +637,10 @@ fn event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Child, Indicator, RowTree, Section, SessionKey, WindowNode};
+    use crate::model::{
+        Branch, Child, Indicator, ProgressState, RowContent, RowTree, Section, SessionKey,
+        WindowNode,
+    };
     use ratatui::backend::TestBackend;
 
     fn sample_view() -> View {
@@ -690,6 +700,42 @@ mod tests {
         assert!(text.contains("WINDOWS"), "header present:\n{text}");
         assert!(text.contains("0: main"), "window row present:\n{text}");
         assert!(text.contains('●'), "attention dot present:\n{text}");
+    }
+
+    #[test]
+    fn the_selection_bar_reverses_a_row_and_drops_its_color() {
+        let colors = Colors::new();
+        // A colored icon and a state-colored indicator: both would paint a block
+        // of color across the bar if their color survived the reverse.
+        let row = Row {
+            content: RowContent::Agent {
+                index: "0".into(),
+                label: "claude - repo".into(),
+                branch: Branch::Last,
+                here: false,
+                color: Some(NamedColor::Green),
+            },
+            id: None,
+            indicator: Indicator::Progress {
+                pct: Some(50),
+                state: ProgressState::Error,
+            },
+        };
+
+        let plain = render_line(&row, &colors, 30, 0, false);
+        assert!(
+            plain.spans.iter().any(|s| s.style.fg.is_some()),
+            "unselected, the icon and indicator keep their colors"
+        );
+
+        let selected = render_line(&row, &colors, 30, 0, true);
+        for span in &selected.spans {
+            assert_eq!(span.style.fg, None, "no color survives the bar: {span:?}");
+            assert!(
+                span.style.add_modifier.contains(Modifier::REVERSED),
+                "the bar spans the whole row: {span:?}"
+            );
+        }
     }
 
     #[test]

@@ -9,18 +9,22 @@ sidebar that follows you.
 
 ```
 ▌ 1: vim
-   ├─ 1: vim
-▌  └─ 2: api-service ●
+  ├─ 1: vim
+▌󱙺 └─ 2: api-service ●
   2: server
-   └─ 1: node
+  └─ 1: node
   3: agents
-   ├─ 1: frontend ⠹
-   └─ 2: docs ⠹
+ 󱙺 ├─ 1: frontend ⠹
+ 󱙺 └─ 2: docs ⠹
 ```
 
 The `▌` in the left column marks where you are: the active window, and the
 active pane inside it. Nothing else is marked, so a window you are not in shows
 no gutter even though tmux would restore you to one of its panes.
+
+The column beside it says what each row is: `` a pane, `󱙺` an agent session
+running in one. These are Nerd Font glyphs, so the sidebar wants a patched font
+in the terminal it draws in.
 
 ## Requirements
 
@@ -279,18 +283,23 @@ Agent-teams teammates are labelled `@name - title` (just `@name` until the
 teammate has a title) in either mode, so you can tell them from top-level
 sessions.
 
-Each agent row is drawn in that session's own assigned color - the one Claude
+A pane or agent row carries its own color on its icon alone - the rest of the
+line stays in your terminal's default. For an agent that is the color Claude
 shows for the session (changed with `/color`), or, for an agent-teams teammate,
-its team color - so a row's color matches the session it points at. Sessions
-with no assigned color (e.g. Copilot CLI) use a default. The shade is matched to
-your Claude theme (read from `~/.claude/settings.json`) and mapped to the same
-xterm-256 index Claude itself emits (Claude renders these colors as 256-color
-indices, so the row matches exactly rather than approximately); the ANSI themes
-and non-256-color terminals fall back to the base terminal colors. Turn state
-stays legible through the spinner/`●` glyph.
+its team color, so the icon ties the row to the session it points at without a
+list of full-width colored lines to read past. A pane's icon takes its color from
+the pane border color, and a session with no assigned color (e.g. Copilot CLI)
+draws its icon in the default too - the `󱙺` shape alone is what says "agent".
 
-A row's color says *which* agent, never which row is live. Where you are is the
-`▌` gutter in the left column, so it stays readable no matter what colors your
+The shade of an assigned color is matched to your Claude theme (read from
+`~/.claude/settings.json`) and mapped to the same xterm-256 index Claude itself
+emits (Claude renders these colors as 256-color indices, so the icon matches
+exactly rather than approximately); the ANSI themes and non-256-color terminals
+fall back to the base terminal colors. Turn state stays legible through the
+spinner/`●` glyph.
+
+Color says *which* agent, never which row is live. Where you are is the `▌`
+gutter in the left column, so it stays readable no matter what colors your
 sessions have.
 
 The sidebar pins a progress indicator to the right edge of each row, from two
