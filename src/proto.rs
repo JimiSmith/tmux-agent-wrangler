@@ -172,7 +172,10 @@ pub fn read_message<R: BufRead, M: DeserializeOwned>(r: &mut R) -> io::Result<Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Indicator, NamedColor, ProgressState, Row, RowKey, RowKind, SessionKey};
+    use crate::model::{
+        Child, Indicator, NamedColor, ProgressState, RowKey, RowTree, Section, SessionKey,
+        WindowNode,
+    };
     use std::io::{BufReader, Cursor};
 
     /// Write `msg`, read it back from the resulting bytes, and assert the decoded
@@ -198,40 +201,46 @@ mod tests {
 
     fn sample_row_model() -> RowModel {
         RowModel {
-            rows: vec![
-                Row {
-                    text: "windows".into(),
-                    kind: RowKind::Header,
-                    key: None,
-                    indicator: Indicator::None,
-                },
-                Row {
-                    text: "1: main".into(),
-                    kind: RowKind::Window {
+            tree: RowTree {
+                sections: vec![Section {
+                    heading: Some("claude".into()),
+                    windows: vec![WindowNode {
+                        id: RowKey::Window {
+                            window: WindowId("@1".into()),
+                        },
+                        index: "1".into(),
+                        name: "main".into(),
                         active: true,
                         color: Some(NamedColor::Cyan),
-                    },
-                    key: Some(RowKey::Window {
-                        window: WindowId("@1".into()),
-                    }),
-                    indicator: Indicator::Attention,
-                },
-                Row {
-                    text: "claude · repo".into(),
-                    kind: RowKind::Agent {
-                        active: false,
-                        color: Some(NamedColor::Purple),
-                    },
-                    key: Some(RowKey::Agent {
-                        session: SessionKey("claude-abc".into()),
-                        pane: PaneId("%5".into()),
-                    }),
-                    indicator: Indicator::Progress {
-                        pct: Some(42),
-                        state: ProgressState::Normal,
-                    },
-                },
-            ],
+                        children: vec![
+                            Child::Pane {
+                                id: RowKey::Pane {
+                                    pane: PaneId("%5".into()),
+                                },
+                                index: "0".into(),
+                                title: "bash".into(),
+                                active: true,
+                                color: None,
+                                indicator: Indicator::Attention,
+                            },
+                            Child::Agent {
+                                id: RowKey::Agent {
+                                    session: SessionKey("claude-abc".into()),
+                                    pane: PaneId("%6".into()),
+                                },
+                                index: "1".into(),
+                                label: "claude · repo".into(),
+                                active: false,
+                                color: Some(NamedColor::Purple),
+                                indicator: Indicator::Progress {
+                                    pct: Some(42),
+                                    state: ProgressState::Normal,
+                                },
+                            },
+                        ],
+                    }],
+                }],
+            },
             selection: Some(RowKey::Pane {
                 pane: PaneId("%5".into()),
             }),

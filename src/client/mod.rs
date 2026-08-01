@@ -3,10 +3,13 @@
 //! It resolves its tmux server/window/pane once at startup, connects to the
 //! daemon, and sends a `Hello`. Thereafter it paints whatever [`RowModel`] the
 //! daemon pushes, animates the spinner locally on the wall clock, and forwards
-//! interaction (an absolute selection key on nav, activate, and terminal focus)
-//! back. The row set, colors, and selection are the daemon's decisions; the
-//! client only turns them into styled lines and resolves the spinner frame at
-//! paint time.
+//! interaction (an absolute selection id on nav, activate, and terminal focus)
+//! back. Which rows exist, what they are named and which is selected are the
+//! daemon's decisions; the client flattens the tree, draws every glyph around
+//! those names, and resolves the spinner frame at paint time. A row's id is an
+//! opaque token here: it is echoed back untouched, never built or inspected.
+
+pub mod render;
 
 use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
@@ -32,9 +35,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 
+use crate::client::render::{base_style, row_text};
 use crate::color::{agent_color_table, claude_dir, read_theme};
 use crate::daemon::rows::{fit, StateColor};
-use crate::model::{Indicator, NamedColor, PaneId, RowKey, RowKind, RowModel, ServerKey, WindowId};
+use crate::model::{NamedColor, PaneId, Row, RowKey, RowModel, ServerKey, WindowId};
 use crate::paths::daemon_socket;
 use crate::proto::{read_message, write_message, ClientMsg, CtlMsg, InputEvent, ServerMsg};
 
@@ -49,7 +53,7 @@ const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Name -> ansi color index, resolved once from the user's theme, plus the
 /// default agent color the same table supplies.
-struct Colors {
+pub struct Colors {
     table: IndexMap<&'static str, i16>,
 }
 
@@ -89,54 +93,18 @@ fn state_color(state: StateColor) -> Color {
     }
 }
 
-/// Bold for a row that is where you are, normal weight otherwise.
-fn weight(active: bool) -> Style {
-    if active {
-        Style::new().bold()
-    } else {
-        Style::new()
-    }
-}
-
-/// The base style for a row from its kind, before the selection bar is applied.
-fn base_style(kind: &RowKind, colors: &Colors) -> Style {
-    match kind {
-        RowKind::Header => Style::new().bold().underlined(),
-        RowKind::Blank => Style::new().dim(),
-        // Bold says "where you are", never which color a row happens to have:
-        // color is reserved for identity (which window, which agent). Pane rows
-        // are for the same reason not dimmed, which used to make every colored
-        // agent row read as the active one.
-        RowKind::Window { active, color } => {
-            let s = weight(*active);
-            match colors.optional(*color) {
-                Some(c) => s.fg(c),
-                None => s,
-            }
-        }
-        RowKind::Pane { active, color } => {
-            let s = weight(*active);
-            match colors.optional(*color) {
-                Some(c) => s.fg(c),
-                None => s,
-            }
-        }
-        RowKind::Agent { active, color } => weight(*active).fg(colors.agent(*color)),
-    }
-}
-
 /// Render one row to a styled line: the text fit to the width with the indicator
 /// pinned to the right edge, and the reverse-video bar applied when selected.
 fn render_line(
-    text: &str,
-    kind: &RowKind,
-    indicator: Indicator,
+    row: &Row,
     colors: &Colors,
     width: usize,
     frame: usize,
     selected: bool,
 ) -> Line<'static> {
-    let base = base_style(kind, colors);
+    let text = row_text(&row.content);
+    let indicator = row.indicator;
+    let base = base_style(&row.content, colors);
     // Reserve the last column so the indicator never touches the pane edge.
     let field = width.saturating_sub(1);
     let (ind_text, ind_color) = indicator.resolve(frame);
@@ -144,7 +112,7 @@ fn render_line(
 
     if !ind_text.is_empty() && field >= ind_len + 2 {
         let reserve = ind_len + 1;
-        let left = fit(text, field - reserve);
+        let left = fit(&text, field - reserve);
         let mut left_style = base;
         let mut ind_style = match ind_color {
             Some(c) => Style::new().fg(state_color(c)),
@@ -163,15 +131,29 @@ fn render_line(
         if selected {
             style = style.add_modifier(Modifier::REVERSED);
         }
-        Line::from(Span::styled(fit(text, field), style))
+        Line::from(Span::styled(fit(&text, field), style))
     }
 }
 
-/// Paint the model, scrolling so the selected row stays visible. `offset` is the
+/// A pushed model with its tree already flattened, so the paint loop walks the
+/// rows rather than the tree on every frame.
+struct View {
+    model: RowModel,
+    rows: Vec<Row>,
+}
+
+impl View {
+    fn new(model: RowModel) -> Self {
+        let rows = model.tree.flatten();
+        View { model, rows }
+    }
+}
+
+/// Paint the view, scrolling so the selected row stays visible. `offset` is the
 /// scroll position, carried between frames.
 fn render(
     frame_ui: &mut ratatui::Frame,
-    model: &RowModel,
+    view: &View,
     colors: &Colors,
     frame: usize,
     offset: &mut usize,
@@ -183,10 +165,9 @@ fn render(
         return;
     }
 
-    let sel_row = model
-        .selection
-        .as_ref()
-        .and_then(|k| model.rows.iter().position(|r| r.key.as_ref() == Some(k)))
+    let selection = view.model.selection.as_ref();
+    let sel_row = selection
+        .and_then(|k| view.rows.iter().position(|r| r.id.as_ref() == Some(k)))
         .unwrap_or(0);
     let mut off = *offset;
     if sel_row < off {
@@ -194,49 +175,42 @@ fn render(
     } else if height > 0 && sel_row >= off + height {
         off = sel_row - height + 1;
     }
-    off = off.min(model.rows.len().saturating_sub(height));
+    off = off.min(view.rows.len().saturating_sub(height));
     *offset = off;
 
     let mut lines = Vec::new();
-    for row in model.rows.iter().skip(off).take(height) {
-        let selected = model.has_focus && row.key.is_some() && row.key == model.selection;
-        lines.push(render_line(
-            &row.text,
-            &row.kind,
-            row.indicator,
-            colors,
-            width,
-            frame,
-            selected,
-        ));
+    for row in view.rows.iter().skip(off).take(height) {
+        let selected = view.model.has_focus && row.id.is_some() && row.id.as_ref() == selection;
+        lines.push(render_line(row, colors, width, frame, selected));
     }
     frame_ui.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
-/// The selectable keys of a model in display order.
-fn selectable_keys(model: &RowModel) -> Vec<RowKey> {
-    model.rows.iter().filter_map(|r| r.key.clone()).collect()
+/// The selectable rows' ids in display order.
+fn selectable_ids(view: &View) -> Vec<RowKey> {
+    view.rows.iter().filter_map(|r| r.id.clone()).collect()
 }
 
-/// The key `delta` steps from the current selection among the selectable rows,
+/// The id `delta` steps from the current selection among the selectable rows,
 /// clamped to the ends. `None` when there is nothing selectable.
-fn neighbor_key(model: &RowModel, delta: isize) -> Option<RowKey> {
-    let keys = selectable_keys(model);
-    if keys.is_empty() {
+fn neighbor_id(view: &View, delta: isize) -> Option<RowKey> {
+    let ids = selectable_ids(view);
+    if ids.is_empty() {
         return None;
     }
-    let pos = model
+    let pos = view
+        .model
         .selection
         .as_ref()
-        .and_then(|k| keys.iter().position(|kk| kk == k))
+        .and_then(|k| ids.iter().position(|kk| kk == k))
         .unwrap_or(0) as isize;
-    let next = (pos + delta).clamp(0, keys.len() as isize - 1) as usize;
-    Some(keys[next].clone())
+    let next = (pos + delta).clamp(0, ids.len() as isize - 1) as usize;
+    Some(ids[next].clone())
 }
 
-/// The key of the selectable row at display line `line` (accounting for scroll).
-fn key_at_line(model: &RowModel, offset: usize, line: usize) -> Option<RowKey> {
-    model.rows.get(offset + line).and_then(|r| r.key.clone())
+/// The id of the selectable row at display line `line` (accounting for scroll).
+fn id_at_line(view: &View, offset: usize, line: usize) -> Option<RowKey> {
+    view.rows.get(offset + line).and_then(|r| r.id.clone())
 }
 
 /// A message from the reader thread: a decoded server push, or the connection
@@ -517,7 +491,7 @@ fn event_loop(
 ) -> io::Result<()> {
     let start = Instant::now();
     let mut offset = 0usize;
-    let mut model: Option<RowModel> = None;
+    let mut view: Option<View> = None;
 
     let (floor, sync) = read_width_options(&ctx.server.0);
     let (init_cols, _) = terminal_size().unwrap_or((32, 24));
@@ -525,9 +499,8 @@ fn event_loop(
 
     loop {
         let frame = (start.elapsed().as_secs_f64() / ANIM_INTERVAL) as usize;
-        if let Some(m) = &model {
-            let m = m.clone();
-            terminal.draw(|f| render(f, &m, colors, frame, &mut offset))?;
+        if let Some(v) = &view {
+            terminal.draw(|f| render(f, v, colors, frame, &mut offset))?;
         } else {
             terminal.draw(|f| {
                 let area = f.area();
@@ -538,7 +511,7 @@ fn event_loop(
         // Drain daemon pushes; a close triggers a reconnect.
         loop {
             match conn.rx.try_recv() {
-                Ok(Incoming::Msg(ServerMsg::Render(m))) => model = Some(m),
+                Ok(Incoming::Msg(ServerMsg::Render(m))) => view = Some(View::new(m)),
                 Ok(Incoming::Msg(ServerMsg::Width { cols })) => {
                     if let Some(w) = width.on_shared_width(cols) {
                         resize_pane(&ctx.server.0, &ctx.pane.0, w);
@@ -574,31 +547,27 @@ fn event_loop(
                     return Ok(());
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if let Some(m) = &model {
-                        if let Some(key) = neighbor_key(m, -1) {
-                            send(
-                                conn,
-                                &ClientMsg::Input {
-                                    event: InputEvent::Select { key },
-                                },
-                            );
-                        }
+                    if let Some(key) = view.as_ref().and_then(|v| neighbor_id(v, -1)) {
+                        send(
+                            conn,
+                            &ClientMsg::Input {
+                                event: InputEvent::Select { key },
+                            },
+                        );
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if let Some(m) = &model {
-                        if let Some(key) = neighbor_key(m, 1) {
-                            send(
-                                conn,
-                                &ClientMsg::Input {
-                                    event: InputEvent::Select { key },
-                                },
-                            );
-                        }
+                    if let Some(key) = view.as_ref().and_then(|v| neighbor_id(v, 1)) {
+                        send(
+                            conn,
+                            &ClientMsg::Input {
+                                event: InputEvent::Select { key },
+                            },
+                        );
                     }
                 }
                 KeyCode::Enter => {
-                    if let Some(key) = model.as_ref().and_then(|m| m.selection.clone()) {
+                    if let Some(key) = view.as_ref().and_then(|v| v.model.selection.clone()) {
                         send(
                             conn,
                             &ClientMsg::Input {
@@ -611,8 +580,8 @@ fn event_loop(
             },
             Event::Mouse(m) => {
                 if let MouseEventKind::Down(MouseButton::Left) = m.kind {
-                    if let Some(model) = &model {
-                        if let Some(key) = key_at_line(model, offset, m.row as usize) {
+                    if let Some(v) = &view {
+                        if let Some(key) = id_at_line(v, offset, m.row as usize) {
                             send(
                                 conn,
                                 &ClientMsg::Input {
@@ -661,58 +630,52 @@ fn event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Row, SessionKey};
+    use crate::model::{Child, Indicator, RowTree, Section, SessionKey, WindowNode};
     use ratatui::backend::TestBackend;
 
-    fn sample_model() -> RowModel {
-        RowModel {
-            rows: vec![
-                Row {
-                    text: " WINDOWS".into(),
-                    kind: RowKind::Header,
-                    key: None,
-                    indicator: Indicator::None,
-                },
-                Row {
-                    text: "* 0: main".into(),
-                    kind: RowKind::Window {
+    fn sample_view() -> View {
+        View::new(RowModel {
+            tree: RowTree {
+                sections: vec![Section {
+                    heading: Some("windows".into()),
+                    windows: vec![WindowNode {
+                        id: RowKey::Window {
+                            window: WindowId("@0".into()),
+                        },
+                        index: "0".into(),
+                        name: "main".into(),
                         active: true,
                         color: None,
-                    },
-                    key: Some(RowKey::Window {
-                        window: WindowId("@0".into()),
-                    }),
-                    indicator: Indicator::None,
-                },
-                Row {
-                    text: "   └─ claude - repo".into(),
-                    kind: RowKind::Agent {
-                        active: false,
-                        color: Some(NamedColor::Green),
-                    },
-                    key: Some(RowKey::Agent {
-                        session: SessionKey("claude-abc".into()),
-                        pane: PaneId("%1".into()),
-                    }),
-                    indicator: Indicator::Attention,
-                },
-            ],
+                        children: vec![Child::Agent {
+                            id: RowKey::Agent {
+                                session: SessionKey("claude-abc".into()),
+                                pane: PaneId("%1".into()),
+                            },
+                            index: "0".into(),
+                            label: "claude - repo".into(),
+                            active: false,
+                            color: Some(NamedColor::Green),
+                            indicator: Indicator::Attention,
+                        }],
+                    }],
+                }],
+            },
             selection: Some(RowKey::Window {
                 window: WindowId("@0".into()),
             }),
             has_focus: true,
-        }
+        })
     }
 
     #[test]
     fn renders_model_to_a_buffer() {
         let colors = Colors::new();
-        let model = sample_model();
+        let view = sample_view();
         let backend = TestBackend::new(24, 6);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut offset = 0;
         terminal
-            .draw(|f| render(f, &model, &colors, 0, &mut offset))
+            .draw(|f| render(f, &view, &colors, 0, &mut offset))
             .unwrap();
 
         let buffer = terminal.backend().buffer();
@@ -730,10 +693,10 @@ mod tests {
     }
 
     #[test]
-    fn neighbor_key_moves_and_clamps() {
-        let model = sample_model();
+    fn neighbor_id_moves_and_clamps() {
+        let view = sample_view();
         // From the window row, down moves to the agent row.
-        let down = neighbor_key(&model, 1).unwrap();
+        let down = neighbor_id(&view, 1).unwrap();
         assert_eq!(
             down,
             RowKey::Agent {
@@ -742,7 +705,7 @@ mod tests {
             }
         );
         // Up from the first selectable clamps to itself.
-        let up = neighbor_key(&model, -1).unwrap();
+        let up = neighbor_id(&view, -1).unwrap();
         assert_eq!(
             up,
             RowKey::Window {
@@ -794,12 +757,14 @@ mod tests {
     }
 
     #[test]
-    fn key_at_line_indexes_selectable_rows() {
-        let model = sample_model();
-        // Line 0 is the header (no key); line 1 is the window row.
-        assert_eq!(key_at_line(&model, 0, 0), None);
+    fn id_at_line_indexes_selectable_rows() {
+        let view = sample_view();
+        // Line 0 is the heading (no id); line 1 is its blank; line 2 is the
+        // window row.
+        assert_eq!(id_at_line(&view, 0, 0), None);
+        assert_eq!(id_at_line(&view, 0, 1), None);
         assert_eq!(
-            key_at_line(&model, 0, 1),
+            id_at_line(&view, 0, 2),
             Some(RowKey::Window {
                 window: WindowId("@0".into())
             })

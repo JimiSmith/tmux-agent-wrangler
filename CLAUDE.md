@@ -38,8 +38,12 @@ trait, so the poll pass and every handler are exercised against a `FakeTmux`
 with no live tmux and no real sockets. `spec/fixtures/*.json` are golden
 fixtures capturing the behaviour of the original Python implementation; the
 parity tests in `color`, `labels`, `daemon::rows`, and `daemon::assoc` assert
-against them, so treat a fixture mismatch as a regression rather than updating
-the fixture.
+against them. They exist to catch drift you did not intend, so a mismatch is a
+regression until you can name the change that caused it — when the change is
+deliberate, move the goldens with it in the same commit and say so. The
+`build_rows` cases assert the drawn line, which is `daemon::rows::build_tree`
+composed with `client::render::row_text`: parity is a property of the two
+together, so the test deliberately reaches across the layer.
 
 **Never run the side-effecting subcommands against the live tmux server.**
 `tmux-entry`, `toggle`, `focus`, `spawn`, and `install-hooks` mutate real state:
@@ -130,27 +134,38 @@ runtime; the concurrency model is the same either way.
   wrong one). Legacy 2-field registry records have no pid to verify and are
   trusted for back-compat: preserve that when touching the record format.
 
-- **`rows.rs`** — builds the flat, semantic row list with each row's progress
-  indicator resolved, in one of two layouts selected by `ViewMode`. Unified (the
-  default) is a single window tree where a pane hosting an agent draws as that
-  agent's row in place of its pane row, keeping the pane framing (branch, index)
-  and swapping in the label, agent color and indicator; a pane hosting two
-  sessions yields a row each. "Where you are" is carried by exactly two rows,
-  the active window and its active pane (`focus_pane`): a `▌` gutter in column 0
-  replacing the sectioned view's inline `*` markers, plus the `active` flag every
-  `RowKind` now carries, which is the *only* thing the client renders bold. Row
-  color means *which agent*, never *which row is live*, so the client also
-  neither dims pane rows nor greens the active window, and turn state is left
-  entirely to the right-edge indicator. `@wrangler-sections` opts into the
-  older layout, the window tree followed by a section per agent, where an
-  agent's pane appears in both. The agent row's `RowKey::Agent` is the same in
-  either, so activation is unchanged and a mid-flight option flip just falls
-  back through `resolve_selection`. Two independently toggled indicator sources: `@wrangler-hook-progress` (default on) draws the
+- **`rows.rs`** — `build_tree` builds the `RowTree` the daemon sends: blocks of
+  windows, each with pane and agent children, every node carrying its progress
+  indicator, its color and the row id the client echoes back. **It formats
+  nothing.** A node's only text is the literal name of the thing — a window's
+  name, a pane's title, an agent's label — and the gutter, branches and index
+  prefix are the client's to compose. A pane hosting an agent contributes that
+  agent in place of itself; hosting two contributes two children.
+  `ViewMode` selects the grouping only: unified (the default) is one unheaded
+  block, and `@wrangler-sections` opts into the window tree followed by a block
+  per agent, where an agent's pane appears in both. Rows are drawn identically
+  either way, so flipping the option regroups without restyling — and an agent's
+  `RowKey::Agent` is the same in both, so activation is unchanged and a
+  mid-flight flip falls back through `resolve_selection`. Two independently
+  toggled indicator sources: `@wrangler-hook-progress` (default on) draws the
   hook turn state (an animated spinner while working, `●` for attention) and
   `@wrangler-osc-progress` (default off) draws a pane's OSC 9;4 report as a
   state-colored percentage, read from `#{pane_pb_state}` / `#{pane_pb_progress}`
   (empty on a tmux too old to know them, so it degrades to a no-op). OSC wins
   when a pane reports an active state, else the hook glyph.
+
+- **`RowTree::flatten` (`src/model.rs`)** — linearises the tree into display
+  rows, deriving the two things that follow from a node's *position*: its
+  `Branch`, and `here` (`window.active && child.active`, so the active pane of a
+  window you are not in does not qualify). Both ends run it — the daemon to
+  resolve the selection, the client to paint — so nav order and paint order are
+  the same order by construction.
+
+- **`client/render.rs`** — the only place a glyph is chosen. `row_text` composes
+  the `▌` gutter, the `├─`/`└─` branches, the index prefix and the heading's
+  spacing and case; `base_style` keeps the channels apart, with weight saying
+  where you are and color saying *which* window or agent, never which row is
+  live. Turn state is left entirely to the right-edge indicator.
 
 - **`notify.rs`** — the bell (`@wrangler-bell`) and the desktop notification
   (`@wrangler-osc-notify`). Raised by the daemon off the poll, not by the hook,
@@ -170,9 +185,11 @@ runtime; the concurrency model is the same either way.
 
 Newline-delimited JSON. Inbound messages arrive as an untagged `Inbound`
 envelope resolved by disjoint `type` tags into `Client`, `Hook`, or `Ctl`;
-outbound the daemon pushes `Render` (the row model), `Width`, and `Exit`.
-Selection is carried as an **absolute** row key, never a relative movement, so
-clients cannot drift out of sync.
+outbound the daemon pushes `Render` (the row tree), `Width`, and `Exit`.
+Selection is carried as an **absolute** row id, never a relative movement, so
+clients cannot drift out of sync. That id is opaque to the client, which only
+echoes back the one riding on the row it acted on; the daemon mints it and is
+the only side that reads its variants.
 
 ### Width sync (`@wrangler-sync-width`, `@wrangler-min-width`)
 

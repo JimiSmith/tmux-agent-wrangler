@@ -60,8 +60,8 @@ run-shell /path/to/tmux-agent-wrangler/wrangler.tmux
 A pane running an agent (Claude Code, Copilot CLI, ...) is listed under its
 window as that session rather than as a plain pane: its label in place of the
 pane title, in the session's own color. Selecting one focuses its window and
-pane. With `@wrangler-sections on` the sessions are instead gathered into a
-section per agent below the windows (`CLAUDE`, `COPILOT`, ...).
+pane. With `@wrangler-sections on` the sessions are also gathered into a section
+per agent below the windows (`CLAUDE`, `COPILOT`, ...).
 
 Each session is annotated with its turn state, so you can see at a glance what
 your agents are doing:
@@ -265,9 +265,10 @@ set -g @wrangler-osc-notify off    # desktop notification when an agent needs at
 By default the sidebar is one window list: every window with its panes beneath
 it, and a pane running an agent drawn as that agent's row (its label, color and
 progress indicator) in place of the pane's own line. Set `@wrangler-sections on`
-for the older layout, where the window tree is followed by a `CLAUDE` /
-`COPILOT` section per agent that repeats the windows with their sessions under
-them, so an agent's pane appears in both.
+to also get a `CLAUDE` / `COPILOT` section per agent below the window tree,
+repeating the windows with their sessions under them, so an agent's pane appears
+in both. The option only groups: a window, a pane and an agent are drawn exactly
+the same wherever they appear.
 
 `@wrangler-label name` shows each agent session's own title (Claude Code's
 generated session name) and falls back to the working-directory basename when no

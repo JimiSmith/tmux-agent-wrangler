@@ -17,11 +17,11 @@ use indexmap::{IndexMap, IndexSet};
 
 use crate::daemon::assoc::{fetch_agent_sessions, RegistryRecord, RegistrySession};
 use crate::daemon::notify::{acknowledge_focused_attention, osc_escape, Notifier, OscNotify};
-use crate::daemon::rows::build_rows;
+use crate::daemon::rows::build_tree;
 use crate::labels::{label_mode_from, LabelCache};
 use crate::model::{
-    PaneId, Row, RowKey, RowKind, RowModel, ServerKey, Session, TurnStatus, ViewMode, Window,
-    WindowId,
+    PaneId, RowContent, RowKey, RowModel, RowTree, ServerKey, Session, TurnStatus, ViewMode,
+    Window, WindowId,
 };
 use crate::proto::{HookAction, InputEvent, ServerMsg};
 
@@ -170,25 +170,29 @@ fn window_has_no_real_panes(window: &WindowId, windows: &[Window]) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve the shared selection against the rows just built: keep the current key
+/// Resolve the shared selection against the tree just built: keep the current id
 /// if it still names a row, else default to the active window's row, else the
 /// first selectable row, else `None` when nothing is selectable.
-fn resolve_selection(current: Option<&RowKey>, rows: &[Row]) -> Option<RowKey> {
-    let first_key = rows.iter().find_map(|r| r.key.as_ref());
-    first_key?;
+///
+/// Resolving against the flattened tree is what keeps the selection in the order
+/// a sidebar navigates and paints in.
+fn resolve_selection(current: Option<&RowKey>, tree: &RowTree) -> Option<RowKey> {
+    let rows = tree.flatten();
+    let first_id = rows.iter().find_map(|r| r.id.as_ref());
+    first_id?;
     if let Some(k) = current {
-        if rows.iter().any(|r| r.key.as_ref() == Some(k)) {
+        if rows.iter().any(|r| r.id.as_ref() == Some(k)) {
             return Some(k.clone());
         }
     }
-    for r in rows {
-        if let (Some(key @ RowKey::Window { .. }), RowKind::Window { active: true, .. }) =
-            (&r.key, &r.kind)
+    for r in &rows {
+        if let (Some(id @ RowKey::Window { .. }), RowContent::Window { active: true, .. }) =
+            (&r.id, &r.content)
         {
-            return Some(key.clone());
+            return Some(id.clone());
         }
     }
-    first_key.cloned()
+    first_id.cloned()
 }
 
 impl State {
@@ -497,7 +501,7 @@ impl State {
         }
 
         let pane_status = pane_status_map(&sessions);
-        let rows = build_rows(
+        let tree = build_tree(
             &fetch.windows,
             &sessions,
             &fetch.pane_progress,
@@ -508,7 +512,7 @@ impl State {
         );
 
         let current = self.servers.get(server).and_then(|s| s.selection.clone());
-        let selection = resolve_selection(current.as_ref(), &rows);
+        let selection = resolve_selection(current.as_ref(), &tree);
         if let Some(s) = self.servers.get_mut(server) {
             s.selection = selection.clone();
         }
@@ -529,7 +533,7 @@ impl State {
             }
             let has_focus = window_focus(&window, &fetch.windows);
             let model = RowModel {
-                rows: rows.clone(),
+                tree: tree.clone(),
                 selection: selection.clone(),
                 has_focus,
             };
@@ -698,9 +702,19 @@ impl TmuxEnv for RealTmux {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::render::row_text;
     use crate::proto::{HookAction, InputEvent};
     use crate::tmux::{parse_windows, FetchResult};
     use std::cell::RefCell;
+
+    /// The lines a pushed tree draws. The layout assertions read as the sidebar
+    /// looks, which is what makes a grouping change visible in them.
+    fn drawn(tree: &RowTree) -> Vec<String> {
+        tree.flatten()
+            .iter()
+            .map(|r| row_text(&r.content))
+            .collect()
+    }
 
     /// A fake environment: canned window/option/ancestry reads, and recorded
     /// effects. `pane_tty` and `client_ttys` are synthesized from their inputs so
@@ -838,9 +852,10 @@ mod tests {
         let model = render_of(&pushes, 0).expect("client gets an initial render");
         assert!(
             model
-                .rows
+                .tree
+                .flatten()
                 .iter()
-                .any(|r| matches!(r.kind, RowKind::Agent { .. })),
+                .any(|r| matches!(r.content, RowContent::Agent { .. })),
             "an agent row is present"
         );
     }
@@ -852,37 +867,34 @@ mod tests {
         register_occupying(&mut state, HookAction::Start, 0);
         let model = render_of(&hello_client(&mut state, &env, 0), 0).unwrap();
 
-        // One window list: the agent's pane row is the agent row, and there is
-        // no header or repeated agent section.
-        let texts: Vec<&str> = model.rows.iter().map(|r| r.text.as_str()).collect();
+        // One window list: the agent's pane is drawn as the agent, and there is
+        // no heading or repeated agent block.
+        let rows = model.tree.flatten();
         // The label, not the pane title: this record carries no title, so the
         // name-mode label falls back to the cwd basename.
-        // Column 0 is the gutter throughout: the active window, and its active
-        // pane.
-        assert_eq!(texts, vec!["▌ 0: main", "▌  └─ 0: x"]);
-        assert!(matches!(model.rows[1].kind, RowKind::Agent { .. }));
+        assert_eq!(drawn(&model.tree), vec!["▌ 0: main", "▌  └─ 0: x"]);
+        assert!(matches!(rows[1].content, RowContent::Agent { .. }));
     }
 
     #[test]
-    fn sections_option_restores_the_agent_sections() {
+    fn sections_option_groups_the_rows_under_headings() {
         let env = env_for(true).with_option("/s", "@wrangler-sections", "on");
         let mut state = State::new();
         register_occupying(&mut state, HookAction::Start, 0);
         let model = render_of(&hello_client(&mut state, &env, 0), 0).unwrap();
 
-        let texts: Vec<&str> = model.rows.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(
-            texts,
+            drawn(&model.tree),
             vec![
                 " WINDOWS",
                 "",
-                "* 0: main",
-                "   └─*0: MySession",
+                "▌ 0: main",
+                "▌  └─ 0: MySession",
                 "",
                 " CLAUDE",
                 "",
-                "* 0: main",
-                "   └─ x",
+                "▌ 0: main",
+                "▌  └─ 0: x",
             ]
         );
     }

@@ -1,10 +1,11 @@
 //! Shared domain vocabulary for the daemon, client, and wire protocol.
 //!
 //! These types are the common language the pure-logic modules (color, labels,
-//! rows, assoc) and the integration layer speak. The daemon builds a semantic
-//! [`RowModel`] and the client paints it: the daemon decides *what* each row is
-//! and its [`Indicator`] state, while the client resolves the spinner frame and
-//! the terminal colors at paint time.
+//! rows, assoc) and the integration layer speak. The daemon builds a [`RowTree`]
+//! and the client draws it: the only text the daemon sends is the literal name
+//! of a thing (a window's name, a pane's title, an agent's label), and the
+//! client composes every glyph around it — the gutter, the tree branches, the
+//! index prefix, the spinner frame and the terminal colors — at paint time.
 
 use serde::{Deserialize, Serialize};
 
@@ -160,47 +161,437 @@ pub enum RowKey {
     Agent { session: SessionKey, pane: PaneId },
 }
 
-/// What a display row is, for styling. Windows, panes, and agents may carry
-/// their own color; a row's turn state is carried by its [`Indicator`], not by
-/// its kind.
+/// The sidebar's whole content, as structure: blocks of windows, each with its
+/// children. Nothing here is laid out — no branch glyphs, no markers, no
+/// prefixes — so the client is free to draw it however it likes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RowTree {
+    pub sections: Vec<Section>,
+}
+
+/// One block of the sidebar. A heading is drawn when present; the unified layout
+/// is a single block with none.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Section {
+    pub heading: Option<String>,
+    pub windows: Vec<WindowNode>,
+}
+
+/// A window and the children shown beneath it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowNode {
+    /// What the client echoes back to select or activate this row. Opaque to the
+    /// client, which never builds or inspects one: the same window listed in two
+    /// blocks carries two different ids, which is what keeps the two rows
+    /// separately selectable.
+    pub id: RowKey,
+    pub index: String,
+    pub name: String,
+    /// tmux's active window.
+    pub active: bool,
+    pub color: Option<NamedColor>,
+    pub children: Vec<Child>,
+}
+
+/// A window's child: a plain pane, or an agent session displayed in one. The two
+/// stay distinct because they are styled differently — an agent row falls back
+/// to the theme's agent color, which only the client knows.
 ///
-/// `active` is "this row is where you are": the active window, and the one pane
-/// that window has focused. Every other row is false, including the active pane
-/// of a window you are not in.
+/// `active` is the one fact tmux reports: this is its own window's active pane.
+/// Whether that also means "where you are" depends on the enclosing window, and
+/// is resolved by [`RowTree::flatten`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RowKind {
-    Header,
+pub enum Child {
+    Pane {
+        id: RowKey,
+        index: String,
+        title: String,
+        active: bool,
+        color: Option<NamedColor>,
+        indicator: Indicator,
+    },
+    Agent {
+        id: RowKey,
+        index: String,
+        label: String,
+        active: bool,
+        color: Option<NamedColor>,
+        indicator: Indicator,
+    },
+}
+
+/// A child's position among its siblings, which is what decides the branch glyph
+/// the client draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Branch {
+    /// A sibling follows.
+    More,
+    /// The last child, which closes the tree.
+    Last,
+}
+
+/// What a flattened row holds: the literal name, plus everything the client
+/// needs to style and frame it. Windows, panes, and agents may carry their own
+/// color; a row's turn state is carried by its [`Indicator`], never by its
+/// content.
+///
+/// `here` is "this row is where you are": the active pane of the active window,
+/// and nothing else, so the active pane of a window you are not in is false.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RowContent {
+    Header {
+        text: String,
+    },
     Blank,
     Window {
+        index: String,
+        name: String,
         active: bool,
         color: Option<NamedColor>,
     },
     Pane {
-        active: bool,
+        index: String,
+        title: String,
+        branch: Branch,
+        here: bool,
         color: Option<NamedColor>,
     },
     Agent {
-        active: bool,
+        index: String,
+        label: String,
+        branch: Branch,
+        here: bool,
         color: Option<NamedColor>,
     },
 }
 
-/// One flattened display row the client paints. `key` marks a selectable row.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// One flattened display row. `id` marks a selectable row, and is the token the
+/// client sends back to act on it.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Row {
-    pub text: String,
-    pub kind: RowKind,
-    pub key: Option<RowKey>,
+    pub content: RowContent,
+    pub id: Option<RowKey>,
     pub indicator: Indicator,
 }
 
-/// The per-window render payload the daemon pushes to a client: the rows to
-/// paint, the shared selection, and whether this sidebar currently has focus
+impl RowTree {
+    /// Linearise the tree in display order: a heading row (and its blanks) per
+    /// headed section, then each window and its children.
+    ///
+    /// This derives the two things that come from a node's *position* — its
+    /// branch, and whether it is where you are — and copies everything else,
+    /// ids included, straight through. Both ends run it, so the order the daemon
+    /// resolves the selection against is the order the client navigates and
+    /// paints in.
+    pub fn flatten(&self) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for section in &self.sections {
+            if let Some(heading) = &section.heading {
+                // Blocks are separated by a blank, but the sidebar does not open
+                // with one.
+                if !rows.is_empty() {
+                    rows.push(plain(RowContent::Blank));
+                }
+                rows.push(plain(RowContent::Header {
+                    text: heading.clone(),
+                }));
+                rows.push(plain(RowContent::Blank));
+            }
+            for w in &section.windows {
+                rows.push(Row {
+                    content: RowContent::Window {
+                        index: w.index.clone(),
+                        name: w.name.clone(),
+                        active: w.active,
+                        color: w.color,
+                    },
+                    id: Some(w.id.clone()),
+                    indicator: Indicator::None,
+                });
+                let last = w.children.len().saturating_sub(1);
+                for (i, child) in w.children.iter().enumerate() {
+                    let branch = if i == last {
+                        Branch::Last
+                    } else {
+                        Branch::More
+                    };
+                    rows.push(child.row(branch, w.active));
+                }
+            }
+        }
+        rows
+    }
+}
+
+impl Child {
+    /// This child as a display row, given its branch position and whether its
+    /// window is the active one.
+    fn row(&self, branch: Branch, window_active: bool) -> Row {
+        match self {
+            Child::Pane {
+                id,
+                index,
+                title,
+                active,
+                color,
+                indicator,
+            } => Row {
+                content: RowContent::Pane {
+                    index: index.clone(),
+                    title: title.clone(),
+                    branch,
+                    here: window_active && *active,
+                    color: *color,
+                },
+                id: Some(id.clone()),
+                indicator: *indicator,
+            },
+            Child::Agent {
+                id,
+                index,
+                label,
+                active,
+                color,
+                indicator,
+            } => Row {
+                content: RowContent::Agent {
+                    index: index.clone(),
+                    label: label.clone(),
+                    branch,
+                    here: window_active && *active,
+                    color: *color,
+                },
+                id: Some(id.clone()),
+                indicator: *indicator,
+            },
+        }
+    }
+}
+
+/// A row that is neither selectable nor indicated: the headings and blanks.
+fn plain(content: RowContent) -> Row {
+    Row {
+        content,
+        id: None,
+        indicator: Indicator::None,
+    }
+}
+
+/// The per-window render payload the daemon pushes to a client: the tree to
+/// draw, the shared selection, and whether this sidebar currently has focus
 /// (the active pane of the active window) so only it shows the selection bar.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RowModel {
-    pub rows: Vec<Row>,
+    pub tree: RowTree,
     pub selection: Option<RowKey>,
     pub has_focus: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane_child(id: &str, index: &str, active: bool) -> Child {
+        Child::Pane {
+            id: RowKey::Pane {
+                pane: PaneId(id.to_string()),
+            },
+            index: index.to_string(),
+            title: format!("title {index}"),
+            active,
+            color: None,
+            indicator: Indicator::None,
+        }
+    }
+
+    fn window_node(id: RowKey, active: bool, children: Vec<Child>) -> WindowNode {
+        WindowNode {
+            id,
+            index: "0".to_string(),
+            name: "w".to_string(),
+            active,
+            color: None,
+            children,
+        }
+    }
+
+    fn window_key(id: &str) -> RowKey {
+        RowKey::Window {
+            window: WindowId(id.to_string()),
+        }
+    }
+
+    fn branches(rows: &[Row]) -> Vec<Branch> {
+        rows.iter()
+            .filter_map(|r| match &r.content {
+                RowContent::Pane { branch, .. } | RowContent::Agent { branch, .. } => Some(*branch),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn heres(rows: &[Row]) -> Vec<bool> {
+        rows.iter()
+            .filter_map(|r| match &r.content {
+                RowContent::Pane { here, .. } | RowContent::Agent { here, .. } => Some(*here),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_the_final_child_closes_the_tree() {
+        for len in 1..=3 {
+            let children: Vec<Child> = (0..len)
+                .map(|i| pane_child(&format!("%{i}"), &i.to_string(), false))
+                .collect();
+            let tree = RowTree {
+                sections: vec![Section {
+                    heading: None,
+                    windows: vec![window_node(window_key("@1"), false, children)],
+                }],
+            };
+            let mut expected = vec![Branch::More; len - 1];
+            expected.push(Branch::Last);
+            assert_eq!(branches(&tree.flatten()), expected, "{len} children");
+        }
+    }
+
+    #[test]
+    fn only_the_active_windows_active_pane_is_here() {
+        let tree = RowTree {
+            sections: vec![Section {
+                heading: None,
+                windows: vec![
+                    window_node(
+                        window_key("@1"),
+                        true,
+                        vec![pane_child("%1", "0", true), pane_child("%2", "1", false)],
+                    ),
+                    // An inactive window still has an active pane; it is not
+                    // where you are.
+                    window_node(window_key("@2"), false, vec![pane_child("%3", "0", true)]),
+                ],
+            }],
+        };
+        assert_eq!(heres(&tree.flatten()), vec![true, false, false]);
+    }
+
+    #[test]
+    fn a_window_whose_sidebar_holds_the_focus_has_no_pane_here() {
+        // The sidebar is not among a window's panes, so an active window whose
+        // panes are all inactive is one whose sidebar has the focus.
+        let tree = RowTree {
+            sections: vec![Section {
+                heading: None,
+                windows: vec![window_node(
+                    window_key("@1"),
+                    true,
+                    vec![pane_child("%1", "0", false)],
+                )],
+            }],
+        };
+        assert_eq!(heres(&tree.flatten()), vec![false]);
+    }
+
+    #[test]
+    fn headed_sections_get_a_heading_and_are_separated_by_a_blank() {
+        let tree = RowTree {
+            sections: vec![
+                Section {
+                    heading: Some("windows".to_string()),
+                    windows: vec![window_node(window_key("@1"), true, vec![])],
+                },
+                Section {
+                    heading: Some("claude".to_string()),
+                    windows: vec![],
+                },
+            ],
+        };
+        let rows = tree.flatten();
+        let shape: Vec<String> = rows
+            .iter()
+            .map(|r| match &r.content {
+                RowContent::Header { text } => format!("header:{text}"),
+                RowContent::Blank => "blank".to_string(),
+                RowContent::Window { .. } => "window".to_string(),
+                RowContent::Pane { .. } => "pane".to_string(),
+                RowContent::Agent { .. } => "agent".to_string(),
+            })
+            .collect();
+        // No blank opens the sidebar, and one separates the two blocks.
+        assert_eq!(
+            shape,
+            vec![
+                "header:windows",
+                "blank",
+                "window",
+                "blank",
+                "header:claude",
+                "blank",
+            ]
+        );
+        assert!(
+            rows.iter()
+                .filter(|r| !matches!(r.content, RowContent::Window { .. }))
+                .all(|r| r.id.is_none()),
+            "headings and blanks are not selectable"
+        );
+    }
+
+    #[test]
+    fn an_unheaded_section_opens_straight_into_its_windows() {
+        let tree = RowTree {
+            sections: vec![Section {
+                heading: None,
+                windows: vec![window_node(window_key("@1"), true, vec![])],
+            }],
+        };
+        assert!(matches!(
+            tree.flatten().as_slice(),
+            [Row {
+                content: RowContent::Window { .. },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn ids_survive_the_walk_in_row_order() {
+        // The same window listed under two blocks carries two distinct ids, which
+        // is what keeps both rows selectable.
+        let agent_window = RowKey::AgentWindow {
+            agent: "claude".to_string(),
+            window: WindowId("@1".to_string()),
+        };
+        let tree = RowTree {
+            sections: vec![
+                Section {
+                    heading: Some("windows".to_string()),
+                    windows: vec![window_node(
+                        window_key("@1"),
+                        true,
+                        vec![pane_child("%1", "0", true)],
+                    )],
+                },
+                Section {
+                    heading: Some("claude".to_string()),
+                    windows: vec![window_node(agent_window.clone(), true, vec![])],
+                },
+            ],
+        };
+        let ids: Vec<RowKey> = tree.flatten().into_iter().filter_map(|r| r.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                window_key("@1"),
+                RowKey::Pane {
+                    pane: PaneId("%1".to_string())
+                },
+                agent_window,
+            ]
+        );
+    }
 }

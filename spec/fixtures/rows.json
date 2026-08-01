@@ -1373,7 +1373,7 @@
         }
       },
       {
-        "text": "* 0: editor",
+        "text": "▌ 0: editor",
         "item": {
           "type": "window",
           "key": [
@@ -1384,7 +1384,7 @@
         }
       },
       {
-        "text": "   ├─*0: vim",
+        "text": "▌  ├─ 0: vim",
         "item": {
           "type": "pane",
           "key": [
@@ -1423,7 +1423,7 @@
         }
       },
       {
-        "text": "   └─*0: tail",
+        "text": "   └─ 0: tail",
         "item": {
           "type": "pane",
           "key": [
@@ -1488,7 +1488,7 @@
         }
       },
       {
-        "text": "* 0: empty",
+        "text": "▌ 0: empty",
         "item": {
           "type": "window",
           "key": [
@@ -1510,7 +1510,7 @@
         }
       },
       {
-        "text": "   └─*0: sh",
+        "text": "   └─ 0: sh",
         "item": {
           "type": "pane",
           "key": [
@@ -1578,7 +1578,7 @@
         }
       },
       {
-        "text": "* 0: work",
+        "text": "▌ 0: work",
         "item": {
           "type": "window",
           "key": [
@@ -1589,7 +1589,7 @@
         }
       },
       {
-        "text": "   └─*0: claude",
+        "text": "▌  └─ 0: claude",
         "item": {
           "type": "pane",
           "key": [
@@ -1621,7 +1621,7 @@
         }
       },
       {
-        "text": "* 0: work",
+        "text": "▌ 0: work",
         "item": {
           "type": "window",
           "key": [
@@ -1633,7 +1633,7 @@
         }
       },
       {
-        "text": "   └─ @alice - Feature",
+        "text": "▌  └─ 0: @alice - Feature",
         "item": {
           "type": "agent",
           "key": [
@@ -1729,7 +1729,7 @@
         }
       },
       {
-        "text": "* 0: w1",
+        "text": "▌ 0: w1",
         "item": {
           "type": "window",
           "key": [
@@ -1740,7 +1740,7 @@
         }
       },
       {
-        "text": "   └─*0: a",
+        "text": "▌  └─ 0: a",
         "item": {
           "type": "pane",
           "key": [
@@ -1765,7 +1765,7 @@
         }
       },
       {
-        "text": "   └─*0: b",
+        "text": "   └─ 0: b",
         "item": {
           "type": "pane",
           "key": [
@@ -1797,7 +1797,7 @@
         }
       },
       {
-        "text": "* 0: w1",
+        "text": "▌ 0: w1",
         "item": {
           "type": "window",
           "key": [
@@ -1809,7 +1809,7 @@
         }
       },
       {
-        "text": "   └─ claude session",
+        "text": "▌  └─ 0: claude session",
         "item": {
           "type": "agent",
           "key": [
@@ -1856,7 +1856,7 @@
         }
       },
       {
-        "text": "   └─ cop session",
+        "text": "   └─ 0: cop session",
         "item": {
           "type": "agent",
           "key": [
@@ -1952,7 +1952,7 @@
         }
       },
       {
-        "text": "* 0: w1",
+        "text": "▌ 0: w1",
         "item": {
           "type": "window",
           "key": [
@@ -1963,7 +1963,7 @@
         }
       },
       {
-        "text": "   └─*0: a",
+        "text": "▌  └─ 0: a",
         "item": {
           "type": "pane",
           "key": [
@@ -1988,7 +1988,7 @@
         }
       },
       {
-        "text": "   └─*0: b",
+        "text": "   └─ 0: b",
         "item": {
           "type": "pane",
           "key": [
@@ -2020,7 +2020,7 @@
         }
       },
       {
-        "text": "* 0: w1",
+        "text": "▌ 0: w1",
         "item": {
           "type": "window",
           "key": [
@@ -2032,7 +2032,7 @@
         }
       },
       {
-        "text": "   └─ here",
+        "text": "▌  └─ 0: here",
         "item": {
           "type": "agent",
           "key": [
@@ -2061,7 +2061,7 @@
         }
       },
       {
-        "text": "   └─ there",
+        "text": "   └─ 0: there",
         "item": {
           "type": "agent",
           "key": [
@@ -2140,7 +2140,7 @@
         }
       },
       {
-        "text": "* 0: w1",
+        "text": "▌ 0: w1",
         "item": {
           "type": "window",
           "key": [
@@ -2151,7 +2151,7 @@
         }
       },
       {
-        "text": "   ├─*0: p1",
+        "text": "▌  ├─ 0: p1",
         "item": {
           "type": "pane",
           "key": [
@@ -2307,7 +2307,7 @@
         }
       },
       {
-        "text": "* 0: w1",
+        "text": "▌ 0: w1",
         "item": {
           "type": "window",
           "key": [
@@ -2318,7 +2318,7 @@
         }
       },
       {
-        "text": "   └─*0: a",
+        "text": "▌  └─ 0: a",
         "item": {
           "type": "pane",
           "key": [
@@ -2350,7 +2350,7 @@
         }
       },
       {
-        "text": "* 0: w1",
+        "text": "▌ 0: w1",
         "item": {
           "type": "window",
           "key": [
@@ -2362,7 +2362,7 @@
         }
       },
       {
-        "text": "   └─ busy",
+        "text": "▌  └─ 0: busy",
         "item": {
           "type": "agent",
           "key": [
