@@ -130,9 +130,22 @@ runtime; the concurrency model is the same either way.
   wrong one). Legacy 2-field registry records have no pid to verify and are
   trusted for back-compat: preserve that when touching the record format.
 
-- **`rows.rs`** — builds the flat, semantic row list (window tree plus agent
-  sections) with each row's progress indicator resolved. Two independently
-  toggled indicator sources: `@wrangler-hook-progress` (default on) draws the
+- **`rows.rs`** — builds the flat, semantic row list with each row's progress
+  indicator resolved, in one of two layouts selected by `ViewMode`. Unified (the
+  default) is a single window tree where a pane hosting an agent draws as that
+  agent's row in place of its pane row, keeping the pane framing (branch, index)
+  and swapping in the label, agent color and indicator; a pane hosting two
+  sessions yields a row each. "Where you are" is carried by exactly two rows,
+  the active window and its active pane (`focus_pane`): a `▌` gutter in column 0
+  replacing the sectioned view's inline `*` markers, plus the `active` flag every
+  `RowKind` now carries, which is the *only* thing the client renders bold. Row
+  color means *which agent*, never *which row is live*, so the client also
+  neither dims pane rows nor greens the active window, and turn state is left
+  entirely to the right-edge indicator. `@wrangler-sections` opts into the
+  older layout, the window tree followed by a section per agent, where an
+  agent's pane appears in both. The agent row's `RowKey::Agent` is the same in
+  either, so activation is unchanged and a mid-flight option flip just falls
+  back through `resolve_selection`. Two independently toggled indicator sources: `@wrangler-hook-progress` (default on) draws the
   hook turn state (an animated spinner while working, `●` for attention) and
   `@wrangler-osc-progress` (default off) draws a pane's OSC 9;4 report as a
   state-colored percentage, read from `#{pane_pb_state}` / `#{pane_pb_progress}`

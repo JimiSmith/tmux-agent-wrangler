@@ -1,5 +1,7 @@
-//! Building the flat, semantic row list (window tree plus agent sections) with
-//! each row's indicator resolved, from the daemon's window/session model.
+//! Building the flat, semantic row list with each row's indicator resolved, from
+//! the daemon's window/session model. Two layouts: a unified window tree whose
+//! agent-hosting panes draw as agent rows, or that tree followed by a section
+//! per agent.
 //!
 //! This decides *what* each row is and which semantic [`Indicator`] it carries,
 //! with no reference to the animation frame. The paint-time helpers that render
@@ -9,7 +11,7 @@
 use indexmap::IndexMap;
 
 use crate::model::{
-    Indicator, PaneId, ProgressState, Row, RowKey, RowKind, Session, TurnStatus, Window,
+    Indicator, PaneId, ProgressState, Row, RowKey, RowKind, Session, TurnStatus, ViewMode, Window,
 };
 
 /// Pane id -> `(pb_state, pb_progress)` from tmux's OSC 9;4 pane vars. A pane
@@ -163,13 +165,13 @@ fn status_str(status: TurnStatus) -> &'static str {
 fn append_agent_rows(
     rows: &mut Vec<Row>,
     group: &[&Session],
+    focus: Option<&PaneId>,
     pane_progress: &PaneProgressMap,
     hook_on: bool,
     osc_on: bool,
 ) {
-    let last = group.len().saturating_sub(1);
     for (i, s) in group.iter().enumerate() {
-        let branch = if i == last { "└─" } else { "├─" };
+        let branch = branch_for(i, group.len());
         let (pb_state, pb_progress) = pane_progress
             .get(&s.pane)
             .map(|(st, pr)| (st.as_str(), *pr))
@@ -180,10 +182,8 @@ fn append_agent_rows(
         rows.push(Row {
             text: format!("   {branch} {}", s.label),
             kind: RowKind::Agent {
+                active: focus == Some(&s.pane),
                 color: s.color,
-                // Bold is driven by the hook turn state alone (working/
-                // attention), independent of any OSC progress indicator.
-                emphatic: matches!(s.status, TurnStatus::Working | TurnStatus::Attention),
             },
             // The pane is part of the key: one session can be filed under
             // several windows at once, and the key must stay unique.
@@ -196,8 +196,106 @@ fn append_agent_rows(
     }
 }
 
-/// Build the flat, semantic row list: the WINDOWS tree, then one section per
-/// distinct agent (sorted).
+/// The branch glyph for the `i`th of `len` children: the last one closes the
+/// tree.
+fn branch_for(i: usize, len: usize) -> &'static str {
+    if i + 1 == len {
+        "└─"
+    } else {
+        "├─"
+    }
+}
+
+/// A sectioned-view pane row, showing the pane's own title.
+///
+/// NOTE: no space after the branch, single-char active marker glued to the index
+/// (asymmetric with the sectioned agent rows on purpose).
+fn pane_row(
+    p: &crate::model::Pane,
+    branch: &str,
+    here: bool,
+    pane_status: &PaneStatusMap,
+    hook_on: bool,
+    osc_on: bool,
+) -> Row {
+    Row {
+        text: format!(
+            "   {branch}{}{}: {}",
+            section_marker(p.active),
+            p.index,
+            p.title
+        ),
+        kind: RowKind::Pane {
+            active: here,
+            color: p.color,
+        },
+        key: Some(RowKey::Pane { pane: p.id.clone() }),
+        indicator: pane_indicator(p, pane_status, hook_on, osc_on),
+    }
+}
+
+/// The pane's own indicator: its mirrored agent hook glyph, and its OSC state.
+fn pane_indicator(
+    p: &crate::model::Pane,
+    pane_status: &PaneStatusMap,
+    hook_on: bool,
+    osc_on: bool,
+) -> Indicator {
+    indicator_for(
+        pane_status.get(&p.id).map(String::as_str).unwrap_or(""),
+        &p.pb_state,
+        p.pb_progress,
+        hook_on,
+        osc_on,
+    )
+}
+
+/// The one pane that is "where you are": the active pane of the active window.
+///
+/// `None` when the active window has focused its sidebar, which is not among its
+/// panes, and when no window is active at all. The active pane of any *other*
+/// window is somewhere you are not, so it never qualifies.
+fn focus_pane(windows: &[Window]) -> Option<&PaneId> {
+    let active = windows.iter().find(|w| w.active)?;
+    active.panes.iter().find(|p| p.active).map(|p| &p.id)
+}
+
+/// Column 0 of a unified row: a block marks "where you are", a space does not.
+///
+/// This is the unified view's only active signal in the row text, replacing the
+/// sectioned view's `*` markers, so it is a fixed position no row color can
+/// imitate. Exactly two rows can carry it: the active window, and its
+/// [`focus_pane`].
+fn gutter(active: bool) -> char {
+    if active {
+        '▌'
+    } else {
+        ' '
+    }
+}
+
+/// Column 0 of a sectioned view row: the `*` the two-section layout has always
+/// used to mark an active window or pane, wherever it is.
+fn section_marker(active: bool) -> char {
+    if active {
+        '*'
+    } else {
+        ' '
+    }
+}
+
+/// The opening of a unified tree row: `"{gutter}  {branch} "`. The width is
+/// identical either way, so the tree stays aligned.
+fn tree_prefix(active: bool, branch: &str) -> String {
+    format!("{}  {branch} ", gutter(active))
+}
+
+/// Build the flat, semantic row list.
+///
+/// [`ViewMode::Unified`] emits one window list, an agent's pane drawn as an
+/// agent row in place of its pane row. [`ViewMode::Sections`] emits the WINDOWS
+/// tree, then one section per distinct agent (sorted), so an agent's pane
+/// appears in both.
 ///
 /// Rows carry a semantic [`Indicator`] and color *names*; the client resolves
 /// the spinner frame, the percentage text, and the terminal colors at paint
@@ -210,7 +308,99 @@ pub fn build_rows(
     pane_status: &PaneStatusMap,
     hook_on: bool,
     osc_on: bool,
+    view_mode: ViewMode,
 ) -> Vec<Row> {
+    match view_mode {
+        ViewMode::Unified => unified_rows(windows, sessions, pane_status, hook_on, osc_on),
+        ViewMode::Sections => sectioned_rows(
+            windows,
+            sessions,
+            pane_progress,
+            pane_status,
+            hook_on,
+            osc_on,
+        ),
+    }
+}
+
+/// The window tree alone, with each agent-hosting pane's row replaced by an
+/// agent row. No section header: there is only one section.
+fn unified_rows(
+    windows: &[Window],
+    sessions: &[Session],
+    pane_status: &PaneStatusMap,
+    hook_on: bool,
+    osc_on: bool,
+) -> Vec<Row> {
+    let focus = focus_pane(windows);
+    let mut rows = Vec::new();
+    for w in windows {
+        rows.push(window_row(
+            w,
+            RowKey::Window {
+                window: w.id.clone(),
+            },
+            gutter(w.active),
+        ));
+        for (i, p) in w.panes.iter().enumerate() {
+            let here = focus == Some(&p.id);
+            let prefix = tree_prefix(here, branch_for(i, w.panes.len()));
+            let hosted: Vec<&Session> = sessions.iter().filter(|s| s.pane == p.id).collect();
+            if hosted.is_empty() {
+                rows.push(Row {
+                    text: format!("{prefix}{}: {}", p.index, p.title),
+                    kind: RowKind::Pane {
+                        active: here,
+                        color: p.color,
+                    },
+                    key: Some(RowKey::Pane { pane: p.id.clone() }),
+                    indicator: pane_indicator(p, pane_status, hook_on, osc_on),
+                });
+                continue;
+            }
+            // A pane can host more than one session (one candidate's recorded
+            // pane can be another's title-matched pane), and each stays
+            // separately selectable, so every one gets a row of its own rather
+            // than the pane row it replaces.
+            for s in hosted {
+                rows.push(Row {
+                    // The pane row's framing with the agent's label in place of
+                    // the pane title, so agent and plain panes stay aligned.
+                    text: format!("{prefix}{}: {}", p.index, s.label),
+                    kind: RowKind::Agent {
+                        active: here,
+                        color: s.color,
+                    },
+                    key: Some(RowKey::Agent {
+                        session: s.id.clone(),
+                        pane: p.id.clone(),
+                    }),
+                    // The agent's own turn state, and the OSC state of the pane
+                    // whose row this is.
+                    indicator: indicator_for(
+                        status_str(s.status),
+                        &p.pb_state,
+                        p.pb_progress,
+                        hook_on,
+                        osc_on,
+                    ),
+                });
+            }
+        }
+    }
+    rows
+}
+
+/// The WINDOWS tree, then one section per distinct agent (sorted).
+fn sectioned_rows(
+    windows: &[Window],
+    sessions: &[Session],
+    pane_progress: &PaneProgressMap,
+    pane_status: &PaneStatusMap,
+    hook_on: bool,
+    osc_on: bool,
+) -> Vec<Row> {
+    let focus = focus_pane(windows);
     let mut rows = Vec::new();
     rows.push(header(" WINDOWS"));
     rows.push(blank());
@@ -221,26 +411,17 @@ pub fn build_rows(
             RowKey::Window {
                 window: w.id.clone(),
             },
+            section_marker(w.active),
         ));
-        let last = w.panes.len().saturating_sub(1);
         for (i, p) in w.panes.iter().enumerate() {
-            let branch = if i == last { "└─" } else { "├─" };
-            let active = if p.active { '*' } else { ' ' };
-            let indicator = indicator_for(
-                pane_status.get(&p.id).map(String::as_str).unwrap_or(""),
-                &p.pb_state,
-                p.pb_progress,
+            rows.push(pane_row(
+                p,
+                branch_for(i, w.panes.len()),
+                focus == Some(&p.id),
+                pane_status,
                 hook_on,
                 osc_on,
-            );
-            rows.push(Row {
-                // NOTE: no space after the branch, single-char active marker
-                // glued to the index (asymmetric with agent rows on purpose).
-                text: format!("   {branch}{active}{}: {}", p.index, p.title),
-                kind: RowKind::Pane { color: p.color },
-                key: Some(RowKey::Pane { pane: p.id.clone() }),
-                indicator,
-            });
+            ));
         }
     }
 
@@ -271,19 +452,20 @@ pub fn build_rows(
                     agent: agent.to_string(),
                     window: w.id.clone(),
                 },
+                section_marker(w.active),
             ));
-            append_agent_rows(&mut rows, &group, pane_progress, hook_on, osc_on);
+            append_agent_rows(&mut rows, &group, focus, pane_progress, hook_on, osc_on);
         }
     }
 
     rows
 }
 
-/// A window heading row (`"{marker} {index}: {name}"`, marker `*` if active).
-/// The `key` distinguishes the top-section row from an agent-section row for the
-/// same physical window.
-fn window_row(w: &Window, key: RowKey) -> Row {
-    let marker = if w.active { '*' } else { ' ' };
+/// A window heading row (`"{marker} {index}: {name}"`). The caller supplies the
+/// active marker its view uses: the sectioned view's `*`, or the unified view's
+/// [`gutter`] block. The `key` distinguishes the top-section row from an
+/// agent-section row for the same physical window.
+fn window_row(w: &Window, key: RowKey, marker: char) -> Row {
     Row {
         text: format!("{marker} {}: {}", w.index, w.name),
         kind: RowKind::Window {
@@ -500,6 +682,7 @@ mod tests {
         let hook_on = input["hook_on"].as_bool().unwrap();
         let osc_on = input["osc_on"].as_bool().unwrap();
 
+        // The fixtures are goldens of the original sectioned layout.
         let rows = build_rows(
             &windows,
             &sessions,
@@ -507,6 +690,7 @@ mod tests {
             &pane_status,
             hook_on,
             osc_on,
+            ViewMode::Sections,
         );
 
         assert_eq!(
@@ -549,17 +733,11 @@ mod tests {
                     assert_indicator(row, item, frame);
                 }
                 "agent" => {
-                    if let RowKind::Agent { color, emphatic } = &row.kind {
+                    if let RowKind::Agent { color, .. } = &row.kind {
                         assert_eq!(
                             *color,
                             parse_color(item["color"].as_str().unwrap()),
                             "agent color: {ctx}"
-                        );
-                        let st = item["status"].as_str().unwrap();
-                        assert_eq!(
-                            *emphatic,
-                            st == "working" || st == "attention",
-                            "agent emphatic: {ctx}"
                         );
                     } else {
                         panic!("kind agent: {ctx}");
@@ -574,6 +752,306 @@ mod tests {
                 other => panic!("unknown item type {other}: {ctx}"),
             }
         }
+    }
+
+    fn pane(id: &str, index: &str, active: bool, title: &str) -> crate::model::Pane {
+        crate::model::Pane {
+            id: PaneId(id.to_string()),
+            index: index.to_string(),
+            active,
+            title: title.to_string(),
+            pb_state: String::new(),
+            pb_progress: None,
+            color: None,
+        }
+    }
+
+    fn window(
+        id: &str,
+        index: &str,
+        name: &str,
+        active: bool,
+        panes: Vec<crate::model::Pane>,
+    ) -> Window {
+        Window {
+            id: WindowId(id.to_string()),
+            index: index.to_string(),
+            name: name.to_string(),
+            active,
+            color: None,
+            panes,
+        }
+    }
+
+    fn session(id: &str, pane: &str, window: &str, label: &str, status: TurnStatus) -> Session {
+        Session {
+            id: SessionKey(id.to_string()),
+            agent: "claude".to_string(),
+            pane: PaneId(pane.to_string()),
+            window: WindowId(window.to_string()),
+            label: label.to_string(),
+            color: None,
+            status,
+        }
+    }
+
+    /// Build in unified mode with no OSC state and both indicator sources' defaults.
+    fn unified(windows: &[Window], sessions: &[Session]) -> Vec<Row> {
+        build_rows(
+            windows,
+            sessions,
+            &PaneProgressMap::new(),
+            &PaneStatusMap::new(),
+            true,
+            false,
+            ViewMode::Unified,
+        )
+    }
+
+    #[test]
+    fn unified_replaces_an_agents_pane_row_and_leaves_the_others() {
+        let windows = vec![window(
+            "@1",
+            "1",
+            "editor",
+            true,
+            vec![
+                pane("%1", "1", true, "nvim"),
+                pane("%2", "2", false, "✳ some pane title"),
+            ],
+        )];
+        let sessions = vec![session(
+            "claude-s1",
+            "%2",
+            "@1",
+            "Fix the bug",
+            TurnStatus::Working,
+        )];
+
+        let rows = unified(&windows, &sessions);
+
+        // No section header, no blank, no repeated agent section: window, pane,
+        // agent row.
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["▌ 1: editor", "▌  ├─ 1: nvim", "   └─ 2: Fix the bug"]
+        );
+
+        assert_eq!(
+            rows[1].kind,
+            RowKind::Pane {
+                active: true,
+                color: None,
+            },
+            "the agent-free pane is untouched, and is where you are"
+        );
+        assert_eq!(
+            rows[1].key,
+            Some(RowKey::Pane {
+                pane: PaneId("%1".into())
+            })
+        );
+
+        assert_eq!(
+            rows[2].kind,
+            RowKind::Agent {
+                active: false,
+                color: None,
+            }
+        );
+        assert_eq!(
+            rows[2].key,
+            Some(RowKey::Agent {
+                session: SessionKey("claude-s1".into()),
+                pane: PaneId("%2".into()),
+            })
+        );
+        assert_eq!(
+            rows[2].indicator,
+            Indicator::Progress {
+                pct: None,
+                state: ProgressState::Plain,
+            },
+            "the row carries the agent's own turn state"
+        );
+    }
+
+    #[test]
+    fn unified_files_a_session_under_every_window_showing_it() {
+        // @2 is not the active window, but %2 is its active pane.
+        let windows = vec![
+            window("@1", "1", "one", true, vec![pane("%1", "1", true, "a")]),
+            window("@2", "2", "two", false, vec![pane("%2", "1", true, "b")]),
+        ];
+        // The same session displayed in two panes is two placements.
+        let sessions = vec![
+            session("claude-s1", "%1", "@1", "Fix the bug", TurnStatus::Idle),
+            session("claude-s1", "%2", "@2", "Fix the bug", TurnStatus::Idle),
+        ];
+
+        let rows = unified(&windows, &sessions);
+
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "▌ 1: one",
+                "▌  └─ 1: Fix the bug",
+                // No gutter anywhere in @2: its active pane is not where you are.
+                "  2: two",
+                "   └─ 1: Fix the bug",
+            ]
+        );
+        // The pane in the key is what keeps the two rows separately selectable.
+        assert_ne!(rows[1].key, rows[3].key);
+
+        // The same fact the gutter shows, in the field the painter styles from.
+        let actives: Vec<bool> = rows
+            .iter()
+            .map(|r| match &r.kind {
+                RowKind::Window { active, .. } => *active,
+                RowKind::Pane { active, .. } => *active,
+                RowKind::Agent { active, .. } => *active,
+                _ => false,
+            })
+            .collect();
+        assert_eq!(actives, vec![true, true, false, false]);
+    }
+
+    #[test]
+    fn unified_marks_nothing_active_when_the_sidebar_holds_the_focus() {
+        // The sidebar is not among a window's panes, so an active window whose
+        // panes are all inactive is a window whose sidebar has the focus.
+        let windows = vec![window(
+            "@1",
+            "1",
+            "editor",
+            true,
+            vec![pane("%1", "1", false, "nvim")],
+        )];
+
+        let rows = unified(&windows, &[]);
+
+        // The window heading still marks itself; no pane claims to be where you
+        // are.
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts, vec!["▌ 1: editor", "   └─ 1: nvim"]);
+        assert_eq!(
+            rows[1].kind,
+            RowKind::Pane {
+                active: false,
+                color: None,
+            }
+        );
+    }
+
+    #[test]
+    fn unified_gives_every_session_sharing_a_pane_its_own_row() {
+        let windows = vec![window(
+            "@1",
+            "1",
+            "editor",
+            true,
+            vec![pane("%1", "1", false, "shared")],
+        )];
+        let sessions = vec![
+            session("claude-s1", "%1", "@1", "first", TurnStatus::Idle),
+            session("claude-s2", "%1", "@1", "second", TurnStatus::Idle),
+        ];
+
+        let rows = unified(&windows, &sessions);
+
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["▌ 1: editor", "   └─ 1: first", "   └─ 1: second"]
+        );
+    }
+
+    #[test]
+    fn unified_agent_row_prefers_osc_progress_over_the_hook_glyph() {
+        let mut p = pane("%1", "1", false, "claude");
+        p.pb_state = "normal".to_string();
+        p.pb_progress = Some(42);
+        let windows = vec![window("@1", "1", "editor", true, vec![p])];
+        let sessions = vec![session(
+            "claude-s1",
+            "%1",
+            "@1",
+            "Fix the bug",
+            TurnStatus::Working,
+        )];
+
+        let rows = build_rows(
+            &windows,
+            &sessions,
+            &PaneProgressMap::new(),
+            &PaneStatusMap::new(),
+            true,
+            true,
+            ViewMode::Unified,
+        );
+
+        assert_eq!(
+            rows[1].indicator,
+            Indicator::Progress {
+                pct: Some(42),
+                state: ProgressState::Normal,
+            }
+        );
+        assert_eq!(
+            rows[1].kind,
+            RowKind::Agent {
+                active: false,
+                color: None,
+            },
+            "the turn state rides on the indicator, not the row kind"
+        );
+    }
+
+    #[test]
+    fn sections_mode_still_draws_the_agent_sections() {
+        let windows = vec![window(
+            "@1",
+            "1",
+            "editor",
+            true,
+            vec![pane("%1", "1", true, "claude")],
+        )];
+        let sessions = vec![session(
+            "claude-s1",
+            "%1",
+            "@1",
+            "Fix the bug",
+            TurnStatus::Idle,
+        )];
+
+        let rows = build_rows(
+            &windows,
+            &sessions,
+            &PaneProgressMap::new(),
+            &PaneStatusMap::new(),
+            true,
+            false,
+            ViewMode::Sections,
+        );
+
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                " WINDOWS",
+                "",
+                "* 1: editor",
+                "   └─*1: claude",
+                "",
+                " CLAUDE",
+                "",
+                "* 1: editor",
+                "   └─ Fix the bug",
+            ]
+        );
     }
 
     #[test]

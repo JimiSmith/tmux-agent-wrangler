@@ -89,31 +89,39 @@ fn state_color(state: StateColor) -> Color {
     }
 }
 
+/// Bold for a row that is where you are, normal weight otherwise.
+fn weight(active: bool) -> Style {
+    if active {
+        Style::new().bold()
+    } else {
+        Style::new()
+    }
+}
+
 /// The base style for a row from its kind, before the selection bar is applied.
 fn base_style(kind: &RowKind, colors: &Colors) -> Style {
     match kind {
         RowKind::Header => Style::new().bold().underlined(),
         RowKind::Blank => Style::new().dim(),
+        // Bold says "where you are", never which color a row happens to have:
+        // color is reserved for identity (which window, which agent). Pane rows
+        // are for the same reason not dimmed, which used to make every colored
+        // agent row read as the active one.
         RowKind::Window { active, color } => {
-            let s = Style::new().bold();
+            let s = weight(*active);
             match colors.optional(*color) {
                 Some(c) => s.fg(c),
-                None if *active => s.fg(Color::Green),
                 None => s,
             }
         }
-        RowKind::Pane { color } => match colors.optional(*color) {
-            Some(c) => Style::new().fg(c),
-            None => Style::new().dim(),
-        },
-        RowKind::Agent { color, emphatic } => {
-            let s = Style::new().fg(colors.agent(*color));
-            if *emphatic {
-                s.bold()
-            } else {
-                s
+        RowKind::Pane { active, color } => {
+            let s = weight(*active);
+            match colors.optional(*color) {
+                Some(c) => s.fg(c),
+                None => s,
             }
         }
+        RowKind::Agent { active, color } => weight(*active).fg(colors.agent(*color)),
     }
 }
 
@@ -679,8 +687,8 @@ mod tests {
                 Row {
                     text: "   └─ claude - repo".into(),
                     kind: RowKind::Agent {
+                        active: false,
                         color: Some(NamedColor::Green),
-                        emphatic: true,
                     },
                     key: Some(RowKey::Agent {
                         session: SessionKey("claude-abc".into()),

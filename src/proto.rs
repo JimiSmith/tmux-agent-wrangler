@@ -219,8 +219,8 @@ mod tests {
                 Row {
                     text: "claude · repo".into(),
                     kind: RowKind::Agent {
+                        active: false,
                         color: Some(NamedColor::Purple),
-                        emphatic: true,
                     },
                     key: Some(RowKey::Agent {
                         session: SessionKey("claude-abc".into()),

@@ -8,29 +8,19 @@ layout — and the sidebars share their selection, so it feels like one
 sidebar that follows you.
 
 ```
- WINDOWS
-
-* 1: vim
+▌ 1: vim
    ├─ 1: vim
-   └─*2: claude
+▌  └─ 2: api-service ●
   2: server
    └─ 1: node
   3: agents
-   ├─ 1: claude
-   └─ 2: copilot
-
- CLAUDE
-
-* 1: vim
-   └─ api-service ●
-  3: agents
-   └─ frontend ⠹
-
- COPILOT
-
-  3: agents
-   └─ docs ⠹
+   ├─ 1: frontend ⠹
+   └─ 2: docs ⠹
 ```
+
+The `▌` in the left column marks where you are: the active window, and the
+active pane inside it. Nothing else is marked, so a window you are not in shows
+no gutter even though tmux would restore you to one of its panes.
 
 ## Requirements
 
@@ -67,9 +57,11 @@ run-shell /path/to/tmux-agent-wrangler/wrangler.tmux
 
 ## Agent sessions
 
-The sidebar shows a section per agent below the windows (`CLAUDE`, `COPILOT`,
-...) listing active sessions running inside the tmux session. Selecting one
-focuses its window and pane.
+A pane running an agent (Claude Code, Copilot CLI, ...) is listed under its
+window as that session rather than as a plain pane: its label in place of the
+pane title, in the session's own color. Selecting one focuses its window and
+pane. With `@wrangler-sections on` the sessions are instead gathered into a
+section per agent below the windows (`CLAUDE`, `COPILOT`, ...).
 
 Each session is annotated with its turn state, so you can see at a glance what
 your agents are doing:
@@ -264,10 +256,18 @@ set -g @wrangler-sync-width on # resizing one sidebar resizes them all ('off' to
 set -g @wrangler-auto-install-hooks off # install agent hooks on plugin load ('on' to enable)
 set -g @wrangler-bell off      # ring the terminal bell when an agent needs attention ('on' to enable)
 set -g @wrangler-label name    # agent row label: 'name' (session title, default) | 'dir' (working-dir basename)
+set -g @wrangler-sections off  # separate WINDOWS/CLAUDE/COPILOT sections ('on' to enable)
 set -g @wrangler-hook-progress on  # spinner/● working/attention indicators from agent hooks ('off' to disable)
 set -g @wrangler-osc-progress off  # OSC 9;4 progress % reported by panes ('on' to enable)
 set -g @wrangler-osc-notify off    # desktop notification when an agent needs attention: 'off' | '777' (or 'on') | '9'
 ```
+
+By default the sidebar is one window list: every window with its panes beneath
+it, and a pane running an agent drawn as that agent's row (its label, color and
+progress indicator) in place of the pane's own line. Set `@wrangler-sections on`
+for the older layout, where the window tree is followed by a `CLAUDE` /
+`COPILOT` section per agent that repeats the windows with their sessions under
+them, so an agent's pane appears in both.
 
 `@wrangler-label name` shows each agent session's own title (Claude Code's
 generated session name) and falls back to the working-directory basename when no
@@ -287,6 +287,10 @@ xterm-256 index Claude itself emits (Claude renders these colors as 256-color
 indices, so the row matches exactly rather than approximately); the ANSI themes
 and non-256-color terminals fall back to the base terminal colors. Turn state
 stays legible through the spinner/`●` glyph.
+
+A row's color says *which* agent, never which row is live. Where you are is the
+`▌` gutter in the left column, so it stays readable no matter what colors your
+sessions have.
 
 The sidebar pins a progress indicator to the right edge of each row, from two
 independent sources you can toggle separately:

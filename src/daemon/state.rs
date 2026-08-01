@@ -20,7 +20,8 @@ use crate::daemon::notify::{acknowledge_focused_attention, osc_escape, Notifier,
 use crate::daemon::rows::build_rows;
 use crate::labels::{label_mode_from, LabelCache};
 use crate::model::{
-    PaneId, Row, RowKey, RowKind, RowModel, ServerKey, Session, TurnStatus, Window, WindowId,
+    PaneId, Row, RowKey, RowKind, RowModel, ServerKey, Session, TurnStatus, ViewMode, Window,
+    WindowId,
 };
 use crate::proto::{HookAction, InputEvent, ServerMsg};
 
@@ -116,6 +117,16 @@ fn opt_enabled_default_off(value: &str) -> bool {
         value.trim().to_lowercase().as_str(),
         "on" | "1" | "yes" | "true"
     )
+}
+
+/// The layout from `@wrangler-sections`, a default-off opt-in: only an on-value
+/// selects the sectioned layout.
+fn view_mode_from(value: &str) -> ViewMode {
+    if opt_enabled_default_off(value) {
+        ViewMode::Sections
+    } else {
+        ViewMode::Unified
+    }
 }
 
 /// The desktop-notification mode from `@wrangler-osc-notify`: `777` (also the
@@ -428,6 +439,7 @@ impl State {
         let bell_on = opt_enabled_default_off(&env.option(&server.0, "@wrangler-bell"));
         let notify_mode = osc_notify_mode(&env.option(&server.0, "@wrangler-osc-notify"));
         let label_mode = label_mode_from(&env.option(&server.0, "@wrangler-label"));
+        let view_mode = view_mode_from(&env.option(&server.0, "@wrangler-sections"));
 
         // This server's records plus every pane-less one, in sorted-key order so
         // candidate order and title-collision tiebreaks are deterministic.
@@ -492,6 +504,7 @@ impl State {
             &pane_status,
             hook_on,
             osc_on,
+            view_mode,
         );
 
         let current = self.servers.get(server).and_then(|s| s.selection.clone());
@@ -829,6 +842,48 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r.kind, RowKind::Agent { .. })),
             "an agent row is present"
+        );
+    }
+
+    #[test]
+    fn default_layout_is_unified() {
+        let env = env_for(true);
+        let mut state = State::new();
+        register_occupying(&mut state, HookAction::Start, 0);
+        let model = render_of(&hello_client(&mut state, &env, 0), 0).unwrap();
+
+        // One window list: the agent's pane row is the agent row, and there is
+        // no header or repeated agent section.
+        let texts: Vec<&str> = model.rows.iter().map(|r| r.text.as_str()).collect();
+        // The label, not the pane title: this record carries no title, so the
+        // name-mode label falls back to the cwd basename.
+        // Column 0 is the gutter throughout: the active window, and its active
+        // pane.
+        assert_eq!(texts, vec!["▌ 0: main", "▌  └─ 0: x"]);
+        assert!(matches!(model.rows[1].kind, RowKind::Agent { .. }));
+    }
+
+    #[test]
+    fn sections_option_restores_the_agent_sections() {
+        let env = env_for(true).with_option("/s", "@wrangler-sections", "on");
+        let mut state = State::new();
+        register_occupying(&mut state, HookAction::Start, 0);
+        let model = render_of(&hello_client(&mut state, &env, 0), 0).unwrap();
+
+        let texts: Vec<&str> = model.rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                " WINDOWS",
+                "",
+                "* 0: main",
+                "   └─*0: MySession",
+                "",
+                " CLAUDE",
+                "",
+                "* 0: main",
+                "   └─ x",
+            ]
         );
     }
 

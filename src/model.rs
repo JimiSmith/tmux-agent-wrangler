@@ -80,8 +80,20 @@ pub enum Indicator {
     },
 }
 
+/// How the sidebar lays out its rows. A distinct type rather than a `bool` so it
+/// cannot be confused with the indicator flags it travels alongside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewMode {
+    /// One window list: a pane hosting an agent draws as an agent row in place
+    /// of its pane row.
+    Unified,
+    /// The window tree, then one section per agent repeating the windows.
+    Sections,
+}
+
 /// An agent session's hook turn state. `Working`/`Attention` are mutually
-/// exclusive; the row is emphasized (bold) in either.
+/// exclusive, and reach the row as its [`Indicator`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TurnStatus {
@@ -148,8 +160,13 @@ pub enum RowKey {
     Agent { session: SessionKey, pane: PaneId },
 }
 
-/// What a display row is, for styling. Windows and panes may carry their own
-/// color; an agent row is `emphatic` (bold) while working or needing attention.
+/// What a display row is, for styling. Windows, panes, and agents may carry
+/// their own color; a row's turn state is carried by its [`Indicator`], not by
+/// its kind.
+///
+/// `active` is "this row is where you are": the active window, and the one pane
+/// that window has focused. Every other row is false, including the active pane
+/// of a window you are not in.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RowKind {
@@ -160,11 +177,12 @@ pub enum RowKind {
         color: Option<NamedColor>,
     },
     Pane {
+        active: bool,
         color: Option<NamedColor>,
     },
     Agent {
+        active: bool,
         color: Option<NamedColor>,
-        emphatic: bool,
     },
 }
 
