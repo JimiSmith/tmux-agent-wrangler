@@ -406,7 +406,30 @@ pub fn run() -> ExitCode {
     }
 }
 
-/// The client-owned width logic. It clamps a user/tmux resize to the floor,
+/// The width range a sidebar is held within. The ceiling is raised to the floor
+/// on construction, so the range can never be empty and `clamp` is total: a
+/// `@wrangler-max-width` set below the minimum yields the minimum rather than a
+/// contradiction to resolve at every resize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WidthBounds {
+    floor: u16,
+    ceiling: u16,
+}
+
+impl WidthBounds {
+    fn new(floor: u16, ceiling: u16) -> Self {
+        Self {
+            floor,
+            ceiling: ceiling.max(floor),
+        }
+    }
+
+    fn clamp(self, cols: u16) -> u16 {
+        cols.clamp(self.floor, self.ceiling)
+    }
+}
+
+/// The client-owned width logic. It clamps a user/tmux resize to the bounds,
 /// publishes the corrected width for the daemon to relay, and adopts a shared
 /// width the daemon pushes, while never re-publishing a resize it requested
 /// itself. `width` is the pane's last known width; `pending` is a width the
@@ -415,22 +438,22 @@ pub fn run() -> ExitCode {
 struct WidthSync {
     width: u16,
     pending: Option<u16>,
-    floor: u16,
+    bounds: WidthBounds,
     sync: bool,
 }
 
 impl WidthSync {
-    fn new(width: u16, floor: u16, sync: bool) -> Self {
+    fn new(width: u16, bounds: WidthBounds, sync: bool) -> Self {
         Self {
             width,
             pending: None,
-            floor,
+            bounds,
             sync,
         }
     }
 
     /// A terminal resize left the pane `new_w` wide. Returns `(resize_to,
-    /// publish)`: a width to resize the pane to (a min-width correction) and a
+    /// publish)`: a width to resize the pane to (a bounds correction) and a
     /// width to publish to the daemon. A resize the client itself requested (its
     /// width equals the pending request) is swallowed, returning neither, so an
     /// adopted or self-corrected width never echoes back as a new user resize.
@@ -441,7 +464,7 @@ impl WidthSync {
         if was_ours {
             return (None, None);
         }
-        let corrected = new_w.max(self.floor);
+        let corrected = self.bounds.clamp(new_w);
         let resize = if corrected != new_w {
             self.pending = Some(corrected);
             Some(corrected)
@@ -464,19 +487,27 @@ impl WidthSync {
     }
 }
 
-/// The sidebar width floor and whether cross-sidebar width sync is on, from
-/// `@wrangler-min-width` (default 24) and `@wrangler-sync-width` (default on).
-fn read_width_options(server: &str) -> (u16, bool) {
-    let floor = crate::tmux::run_tmux(server, &["show-option", "-gqv", "@wrangler-min-width"])
-        .trim()
-        .parse::<u16>()
-        .unwrap_or(24);
+/// The sidebar width bounds and whether cross-sidebar width sync is on, from
+/// `@wrangler-min-width` (default 24), `@wrangler-max-width` (default unbounded)
+/// and `@wrangler-sync-width` (default on).
+fn read_width_options(server: &str) -> (WidthBounds, bool) {
+    let floor = width_option(server, "@wrangler-min-width").unwrap_or(24);
+    let ceiling = width_option(server, "@wrangler-max-width").unwrap_or(u16::MAX);
     let sync_raw = crate::tmux::run_tmux(server, &["show-option", "-gqv", "@wrangler-sync-width"]);
     let sync = !matches!(
         sync_raw.trim().to_lowercase().as_str(),
         "off" | "0" | "no" | "false"
     );
-    (floor, sync)
+    (WidthBounds::new(floor, ceiling), sync)
+}
+
+/// A column count from the tmux option `name`, or `None` when it is unset or not
+/// a number.
+fn width_option(server: &str, name: &str) -> Option<u16> {
+    crate::tmux::run_tmux(server, &["show-option", "-gqv", name])
+        .trim()
+        .parse::<u16>()
+        .ok()
 }
 
 /// Resize this pane to `cols` columns (best-effort).
@@ -500,9 +531,9 @@ fn event_loop(
     let mut offset = 0usize;
     let mut view: Option<View> = None;
 
-    let (floor, sync) = read_width_options(&ctx.server.0);
+    let (bounds, sync) = read_width_options(&ctx.server.0);
     let (init_cols, _) = terminal_size().unwrap_or((32, 24));
-    let mut width = WidthSync::new(init_cols, floor, sync);
+    let mut width = WidthSync::new(init_cols, bounds, sync);
 
     loop {
         let frame = (start.elapsed().as_secs_f64() / ANIM_INTERVAL) as usize;
@@ -760,17 +791,22 @@ mod tests {
         );
     }
 
+    /// The default bounds: a floor of 24 and no ceiling.
+    fn bounds() -> WidthBounds {
+        WidthBounds::new(24, u16::MAX)
+    }
+
     #[test]
-    fn user_resize_above_floor_publishes_without_correcting() {
-        let mut w = WidthSync::new(40, 24, true);
-        // A user drag to 30 is above the floor: no correction, publish 30.
+    fn user_resize_within_bounds_publishes_without_correcting() {
+        let mut w = WidthSync::new(40, bounds(), true);
+        // A user drag to 30 is inside the bounds: no correction, publish 30.
         assert_eq!(w.on_terminal_resize(30), (None, Some(30)));
         assert_eq!(w.pending, None);
     }
 
     #[test]
     fn user_resize_below_floor_clamps_and_publishes_the_floor() {
-        let mut w = WidthSync::new(40, 24, true);
+        let mut w = WidthSync::new(40, bounds(), true);
         // A drag to 10 is clamped up to 24, which is both the resize and the
         // published width.
         assert_eq!(w.on_terminal_resize(10), (Some(24), Some(24)));
@@ -781,8 +817,28 @@ mod tests {
     }
 
     #[test]
+    fn user_resize_above_ceiling_clamps_and_publishes_the_ceiling() {
+        let mut w = WidthSync::new(40, WidthBounds::new(24, 48), true);
+        // A drag to 60 is clamped down to 48, which is both the resize and the
+        // published width.
+        assert_eq!(w.on_terminal_resize(60), (Some(48), Some(48)));
+        assert_eq!(w.pending, Some(48));
+        // The clamp's own resize event lands at 48 and is swallowed (no echo).
+        assert_eq!(w.on_terminal_resize(48), (None, None));
+        assert_eq!(w.pending, None);
+    }
+
+    #[test]
+    fn a_ceiling_below_the_floor_pins_the_width_to_the_floor() {
+        let mut w = WidthSync::new(40, WidthBounds::new(24, 10), true);
+        assert_eq!(w.on_terminal_resize(60), (Some(24), Some(24)));
+        assert_eq!(w.on_terminal_resize(24), (None, None));
+        assert_eq!(w.on_terminal_resize(5), (Some(24), Some(24)));
+    }
+
+    #[test]
     fn adopted_shared_width_does_not_echo() {
-        let mut w = WidthSync::new(40, 24, true);
+        let mut w = WidthSync::new(40, bounds(), true);
         // A follower adopts the shared width 30, then its resize event lands.
         assert_eq!(w.on_shared_width(30), Some(30));
         assert_eq!(w.on_terminal_resize(30), (None, None));
@@ -792,9 +848,9 @@ mod tests {
 
     #[test]
     fn sync_off_never_publishes_or_adopts() {
-        let mut w = WidthSync::new(40, 24, false);
-        // A user drag above the floor still applies no correction and, with sync
-        // off, publishes nothing.
+        let mut w = WidthSync::new(40, bounds(), false);
+        // A user drag inside the bounds still applies no correction and, with
+        // sync off, publishes nothing.
         assert_eq!(w.on_terminal_resize(30), (None, None));
         // A relayout below the floor still clamps locally, but publishes nothing.
         assert_eq!(w.on_terminal_resize(10), (Some(24), None));

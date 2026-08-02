@@ -203,11 +203,13 @@ clients cannot drift out of sync. That id is opaque to the client, which only
 echoes back the one riding on the row it acted on; the daemon mints it and is
 the only side that reads its variants.
 
-### Width sync (`@wrangler-sync-width`, `@wrangler-min-width`)
+### Width sync (`@wrangler-sync-width`, `@wrangler-min-width`, `@wrangler-max-width`)
 
 Owned by the client, and shaped around the fact that only one sidebar is
 resized at a time in practice. A *user* resize (tmux resized the pane) is
-clamped to the minimum width and published to the daemon, which relays a
+clamped to the `WidthBounds` (whose ceiling is raised to its floor on
+construction, so a max below the min is simply the min) and published to the
+daemon, which relays a
 `Width` message to the other clients on that server; they adopt it. A resize the
 client asked for itself is swallowed via a recorded `pending` width, so an
 adopted width never echoes back as a new user resize. The result is one "lead"

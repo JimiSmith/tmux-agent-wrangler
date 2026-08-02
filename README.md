@@ -256,6 +256,7 @@ set -g @wrangler-key 'Tab'   # toggle key (bound with prefix)
 set -g @wrangler-focus-key 'a' # focus this window's sidebar (bound with prefix)
 set -g @wrangler-width 32      # sidebar width in columns
 set -g @wrangler-min-width 24  # sidebar snaps back if squeezed below this
+set -g @wrangler-max-width 48  # sidebar snaps back if dragged above this (unset: no limit)
 set -g @wrangler-sync-width on # resizing one sidebar resizes them all ('off' to disable)
 set -g @wrangler-auto-install-hooks off # install agent hooks on plugin load ('on' to enable)
 set -g @wrangler-bell off      # ring the terminal bell when an agent needs attention ('on' to enable)
