@@ -1057,7 +1057,10 @@ mod tests {
         let rows = model.tree.flatten();
         // The label, not the pane title: this record carries no title, so the
         // name-mode label falls back to the cwd basename.
-        assert_eq!(drawn(&model.tree), vec!["▌ 0: main", "▌\u{f167a} └─ 0: x"]);
+        assert_eq!(
+            drawn(&model.tree),
+            vec!["▌ 0: main", "▌ └─ 0: \u{f167a}  x"]
+        );
         assert!(matches!(rows[1].content, RowContent::Agent { .. }));
     }
 
@@ -1074,12 +1077,12 @@ mod tests {
                 " WINDOWS",
                 "",
                 "▌ 0: main",
-                "▌\u{f489} └─ 0: MySession",
+                "▌ └─ 0: \u{f489}  MySession",
                 "",
                 " CLAUDE",
                 "",
                 "▌ 0: main",
-                "▌\u{f167a} └─ 0: x",
+                "▌ └─ 0: \u{f167a}  x",
             ]
         );
     }

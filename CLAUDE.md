@@ -168,11 +168,12 @@ runtime; the concurrency model is the same either way.
   to end in the same order.
 
 - **`client/render.rs`** — the only place a glyph is chosen. `parts` splits a row
-  into the `▌` gutter, the kind icon (`` pane, `󱙺` agent, Nerd Font glyphs one
-  column wide) and the rest — the `├─`/`└─` branches, the index prefix, the
-  heading's spacing and case. `row_text` concatenates that split (the daemon's
-  parity tests assert the line it yields) and `row_segments` styles it, which is
-  the split's reason to exist: **a child's color goes on its icon and nothing
+  into the tree it hangs off (the `▌` gutter, the `├─`/`└─` branches, the
+  index prefix, the heading's spacing and case), the kind icon (`` pane,
+  `󱙺` agent, Nerd Font glyphs one column wide) and the name it labels, which
+  the icon sits beside rather than out at the margin. `row_text` concatenates
+  that split (the daemon's parity tests assert the line it yields) and
+  `row_segments` styles it, which is the split's reason to exist: **a child's color goes on its icon and nothing
   else**, because a list of full-width colored rows is unreadable and the icon
   alone ties a row to its thing. Only a window row, having no icon, colors its
   whole line. `base_style` therefore carries weight (where you are) but no

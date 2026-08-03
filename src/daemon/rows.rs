@@ -769,8 +769,8 @@ mod tests {
             texts,
             vec![
                 "▌ 1: editor",
-                "▌\u{f489} ├─ 1: nvim",
-                " \u{f167a} └─ 2: Fix the bug"
+                "▌ ├─ 1: \u{f489}  nvim",
+                "  └─ 2: \u{f167a}  Fix the bug"
             ]
         );
 
@@ -839,10 +839,10 @@ mod tests {
             texts,
             vec![
                 "▌ 1: one",
-                "▌\u{f167a} └─ 1: Fix the bug",
+                "▌ └─ 1: \u{f167a}  Fix the bug",
                 // No gutter anywhere in @2: its active pane is not where you are.
                 "  2: two",
-                " \u{f167a} └─ 1: Fix the bug",
+                "  └─ 1: \u{f167a}  Fix the bug",
             ]
         );
         // The pane in the id is what keeps the two rows separately selectable.
@@ -866,7 +866,7 @@ mod tests {
         // The window heading still marks itself; no pane claims to be where you
         // are.
         let texts: Vec<String> = rows.iter().map(|r| row_text(&r.content)).collect();
-        assert_eq!(texts, vec!["▌ 1: editor", " \u{f489} └─ 1: nvim"]);
+        assert_eq!(texts, vec!["▌ 1: editor", "  └─ 1: \u{f489}  nvim"]);
     }
 
     #[test]
@@ -893,8 +893,8 @@ mod tests {
             texts,
             vec![
                 "▌ 1: editor",
-                " \u{f167a} ├─ 1: first",
-                " \u{f167a} └─ 1: second"
+                "  ├─ 1: \u{f167a}  first",
+                "  └─ 1: \u{f167a}  second"
             ]
         );
     }
@@ -972,12 +972,12 @@ mod tests {
                 " WINDOWS",
                 "",
                 "▌ 1: editor",
-                "▌\u{f489} └─ 1: claude",
+                "▌ └─ 1: \u{f489}  claude",
                 "",
                 " CLAUDE",
                 "",
                 "▌ 1: editor",
-                "▌\u{f167a} └─ 1: Fix the bug",
+                "▌ └─ 1: \u{f167a}  Fix the bug",
             ]
         );
     }

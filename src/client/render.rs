@@ -38,7 +38,8 @@ fn branch(branch: Branch) -> char {
     }
 }
 
-/// Column 1: what kind of thing the row is. Nerd Font glyphs, one column wide.
+/// What kind of thing the row is, drawn immediately before its name. Nerd Font
+/// glyphs, one column wide.
 ///
 /// This is the only thing distinguishing an agent from a plain pane: a child row
 /// draws its name in the terminal's default whatever color the thing carries, so
@@ -47,8 +48,8 @@ const ICON_PANE: char = '\u{f489}';
 const ICON_AGENT: char = '\u{f167a}';
 
 /// A description line hangs beneath its title, indented to the column the
-/// title's text starts in (past the gutter, the icon and their space).
-const BODY_INDENT: &str = "   ";
+/// title's text starts in (past the gutter, the icon and the gap after it).
+const BODY_INDENT: &str = "    ";
 
 /// The columns a description line has for its text in a pane `width` columns
 /// wide: the indent comes off the front and the reserved right-hand column off
@@ -71,9 +72,9 @@ enum Parts {
     },
 }
 
-/// A child row's pieces: the gutter, its kind icon, then the branch, index and
-/// name. What precedes the name is the same width whatever the branch and icon
-/// are, so the tree stays aligned.
+/// A child row's pieces: the gutter, the branch and index, then its kind icon
+/// and name. The icon sits with the name it labels rather than out at the
+/// margin, so the tree it hangs off reads as one unbroken structure.
 fn child_parts(
     here: bool,
     icon: char,
@@ -83,9 +84,11 @@ fn child_parts(
     color: Option<NamedColor>,
 ) -> Parts {
     Parts::Split {
-        head: gutter(here).to_string(),
+        head: format!("{} {}─ {index}: ", gutter(here), branch(position)),
         icon,
-        tail: format!(" {}─ {index}: {name}", branch(position)),
+        // Two spaces, not one: the icons overhang the single column they are
+        // declared as, and one space leaves the name touching the glyph.
+        tail: format!("  {name}"),
         color,
     }
 }
@@ -121,7 +124,7 @@ fn parts(content: &RowContent) -> Parts {
         RowContent::NotificationTitle { title, color } => Parts::Split {
             head: " ".to_string(),
             icon: ICON_AGENT,
-            tail: format!(" {title}"),
+            tail: format!("  {title}"),
             color: *color,
         },
         RowContent::NotificationBody { text } => Parts::Whole(format!("{BODY_INDENT}{text}")),
@@ -298,11 +301,11 @@ mod tests {
     fn a_child_row_is_indented_under_its_window() {
         assert_eq!(
             row_text(&pane("0", "nvim", Branch::More, false)),
-            " \u{f489} ├─ 0: nvim"
+            "  ├─ 0: \u{f489}  nvim"
         );
         assert_eq!(
             row_text(&pane("1", "bash", Branch::Last, true)),
-            "▌\u{f489} └─ 1: bash"
+            "▌ └─ 1: \u{f489}  bash"
         );
     }
 
@@ -329,7 +332,7 @@ mod tests {
                 title: "claude".to_string(),
                 color: None,
             }),
-            " \u{f167a} claude"
+            " \u{f167a}  claude"
         );
     }
 
@@ -342,7 +345,7 @@ mod tests {
         let body = row_text(&RowContent::NotificationBody {
             text: "vim · api".to_string(),
         });
-        assert_eq!(body, "   vim · api");
+        assert_eq!(body, "    vim · api");
         // Columns, not byte offsets: the icon is one column and several bytes.
         let column = |line: &str, text: &str| line.chars().count() - text.chars().count();
         assert_eq!(
@@ -361,15 +364,15 @@ mod tests {
         };
         let segments = row_segments(&content, &colors);
         let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(texts, vec![" ", "\u{f167a}", " a"]);
+        assert_eq!(texts, vec![" ", "\u{f167a}", "  a"]);
         assert!(segments[1].style.fg.is_some(), "the icon carries the color");
         assert!(segments[2].style.fg.is_none(), "the title stays default");
     }
 
     #[test]
     fn the_description_field_leaves_room_for_the_indent_and_the_edge() {
-        // 24 columns: three of indent and one reserved at the right edge.
-        assert_eq!(notification_body_field(24), 20);
+        // 24 columns: four of indent and one reserved at the right edge.
+        assert_eq!(notification_body_field(24), 19);
         // Absurdly narrow panes still yield a field to wrap into.
         assert_eq!(notification_body_field(2), 1);
     }
@@ -399,9 +402,9 @@ mod tests {
         let colors = Colors::new();
         let segments = row_segments(&colored_agent(NamedColor::Cyan), &colors);
         let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(texts, vec![" ", "\u{f167a}", " └─ 0: a"]);
+        assert_eq!(texts, vec!["  └─ 0: ", "\u{f167a}", "  a"]);
         assert!(segments[1].style.fg.is_some(), "the icon carries the color");
-        assert!(segments[0].style.fg.is_none());
+        assert!(segments[0].style.fg.is_none(), "the tree stays default");
         assert!(segments[2].style.fg.is_none(), "the name stays default");
     }
 
@@ -446,7 +449,7 @@ mod tests {
             width + 3,
         );
         let texts: Vec<String> = padded.iter().map(|s| s.text.clone()).collect();
-        assert_eq!(texts[0], " ", "the gutter is untouched");
+        assert_eq!(texts[0], "  └─ 0: ", "the tree is untouched");
         assert_eq!(texts[1], "\u{f167a}", "the icon keeps its own segment");
         assert!(
             texts[2].ends_with("   "),
