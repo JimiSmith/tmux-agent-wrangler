@@ -92,13 +92,17 @@ fn state_color(state: StateColor) -> Color {
 /// The reverse-video bar marking the selected row, applied to every span of it
 /// so the bar spans the whole width rather than the colored pieces alone.
 ///
-/// The bar drops the color it covers: under reverse video a foreground color
-/// becomes the background, so a colored icon or indicator would paint a block of
-/// color across the bar. Reverse video already says which row is selected, and
-/// the weight and glyphs survive it.
+/// The bar drops the color and the dimming it covers: under reverse video both
+/// land on what is now the background, so a colored icon would paint a block of
+/// color across the bar and a dimmed row — which is most of them, since pointing
+/// at another window is what the sidebar is for — would wash it out. Reverse
+/// video already says which row is selected, and the bold and the glyphs survive
+/// it.
 fn selection_bar(style: Style, selected: bool) -> Style {
     if selected {
-        Style { fg: None, ..style }.add_modifier(Modifier::REVERSED)
+        Style { fg: None, ..style }
+            .remove_modifier(Modifier::DIM)
+            .add_modifier(Modifier::REVERSED)
     } else {
         style
     }
@@ -804,8 +808,8 @@ fn event_loop(
 mod tests {
     use super::*;
     use crate::model::{
-        Branch, Child, Indicator, NotificationNode, ProgressState, RowContent, RowTree, Section,
-        SessionKey, WindowNode,
+        Branch, Child, Indicator, NotificationNode, Placement, ProgressState, RowContent, RowTree,
+        Section, SessionKey, WindowNode,
     };
     use ratatui::backend::TestBackend;
 
@@ -987,7 +991,7 @@ mod tests {
                 index: "0".into(),
                 label: "claude - repo".into(),
                 branch: Branch::Last,
-                here: false,
+                placement: Placement::Focused,
                 color: Some(NamedColor::Green),
             },
             id: None,
@@ -1009,6 +1013,35 @@ mod tests {
             assert!(
                 span.style.add_modifier.contains(Modifier::REVERSED),
                 "the bar spans the whole row: {span:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_selection_bar_undims_the_row_it_covers() {
+        // Pointing at another window is what the sidebar is for, so the selected
+        // row is usually a dimmed one; the bar has to read at full strength.
+        let colors = Colors::new();
+        let row = Row {
+            content: RowContent::Agent {
+                index: "0".into(),
+                label: "claude - repo".into(),
+                branch: Branch::Last,
+                placement: Placement::Unfocused,
+                color: None,
+            },
+            id: None,
+            indicator: Indicator::None,
+        };
+
+        assert!(render_line(&row, &colors, 30, 0, false)
+            .spans
+            .iter()
+            .all(|s| s.style.add_modifier.contains(Modifier::DIM)));
+        for span in &render_line(&row, &colors, 30, 0, true).spans {
+            assert!(
+                !span.style.add_modifier.contains(Modifier::DIM),
+                "no dimming survives the bar: {span:?}"
             );
         }
     }

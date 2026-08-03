@@ -22,8 +22,8 @@ use crate::daemon::notify::{
 use crate::daemon::rows::build_tree;
 use crate::labels::{label_mode_from, LabelCache};
 use crate::model::{
-    notification_ids, NamedColor, NotificationNode, PaneId, RowContent, RowKey, RowModel, RowTree,
-    ServerKey, Session, SessionKey, TurnStatus, ViewMode, Window, WindowId,
+    notification_ids, NamedColor, NotificationNode, PaneId, Placement, RowContent, RowKey,
+    RowModel, RowTree, ServerKey, Session, SessionKey, TurnStatus, ViewMode, Window, WindowId,
 };
 use crate::proto::{HookAction, InputEvent, ServerMsg};
 
@@ -217,8 +217,13 @@ fn resolve_selection(
         }
     }
     for r in &rows {
-        if let (Some(id @ RowKey::Window { .. }), RowContent::Window { active: true, .. }) =
-            (&r.id, &r.content)
+        if let (
+            Some(id @ RowKey::Window { .. }),
+            RowContent::Window {
+                placement: Placement::Here,
+                ..
+            },
+        ) = (&r.id, &r.content)
         {
             return Some(id.clone());
         }

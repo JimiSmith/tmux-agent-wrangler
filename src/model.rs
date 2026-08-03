@@ -263,13 +263,54 @@ pub enum Branch {
     Last,
 }
 
+/// Where a row sits relative to the focus, which is what its weight and its
+/// dimming are read off.
+///
+/// The two facts it carries are not independent — only the window you are in has
+/// a `Here` child — so they travel as one value rather than as two bools a
+/// caller could combine into a state that cannot happen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// The one row that is where you are: the active pane of the active window,
+    /// or the active window itself.
+    Here,
+    /// In the window you are in, but not the row you are on.
+    Focused,
+    /// In a window you are not in.
+    Unfocused,
+}
+
+impl Placement {
+    /// A window row's placement. It is never `Focused`: for a window row, being
+    /// in the focused window is the same as being it.
+    pub fn window(active: bool) -> Self {
+        if active {
+            Placement::Here
+        } else {
+            Placement::Unfocused
+        }
+    }
+
+    /// A child row's placement, from its window's focus and its own.
+    pub fn child(window_active: bool, active: bool) -> Self {
+        match (window_active, active) {
+            (true, true) => Placement::Here,
+            (true, false) => Placement::Focused,
+            (false, _) => Placement::Unfocused,
+        }
+    }
+
+    /// Whether this is the row that is where you are, which is what the gutter
+    /// marks.
+    pub fn here(self) -> bool {
+        matches!(self, Placement::Here)
+    }
+}
+
 /// What a flattened row holds: the literal name, plus everything the client
 /// needs to style and frame it. Windows, panes, and agents may carry their own
 /// color; a row's turn state is carried by its [`Indicator`], never by its
 /// content.
-///
-/// `here` is "this row is where you are": the active pane of the active window,
-/// and nothing else, so the active pane of a window you are not in is false.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowContent {
     Header {
@@ -279,21 +320,21 @@ pub enum RowContent {
     Window {
         index: String,
         name: String,
-        active: bool,
+        placement: Placement,
         color: Option<NamedColor>,
     },
     Pane {
         index: String,
         title: String,
         branch: Branch,
-        here: bool,
+        placement: Placement,
         color: Option<NamedColor>,
     },
     Agent {
         index: String,
         label: String,
         branch: Branch,
-        here: bool,
+        placement: Placement,
         color: Option<NamedColor>,
     },
     /// The first line of a notification-area entry: the agent that raised it. It
@@ -322,10 +363,10 @@ impl RowTree {
     /// headed section, then each window and its children.
     ///
     /// This derives the two things that come from a node's *position* — its
-    /// branch, and whether it is where you are — and copies everything else,
-    /// ids included, straight through. Both ends run it, so the order the daemon
-    /// resolves the selection against is the order the client navigates and
-    /// paints in.
+    /// branch, and its placement relative to the focus — and copies everything
+    /// else, ids included, straight through. Both ends run it, so the order the
+    /// daemon resolves the selection against is the order the client navigates
+    /// and paints in.
     pub fn flatten(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         for section in &self.sections {
@@ -345,7 +386,7 @@ impl RowTree {
                     content: RowContent::Window {
                         index: w.index.clone(),
                         name: w.name.clone(),
-                        active: w.active,
+                        placement: Placement::window(w.active),
                         color: w.color,
                     },
                     id: Some(w.id.clone()),
@@ -383,7 +424,7 @@ impl Child {
                     index: index.clone(),
                     title: title.clone(),
                     branch,
-                    here: window_active && *active,
+                    placement: Placement::child(window_active, *active),
                     color: *color,
                 },
                 id: Some(id.clone()),
@@ -401,7 +442,7 @@ impl Child {
                     index: index.clone(),
                     label: label.clone(),
                     branch,
-                    here: window_active && *active,
+                    placement: Placement::child(window_active, *active),
                     color: *color,
                 },
                 id: Some(id.clone()),
@@ -501,10 +542,12 @@ mod tests {
             .collect()
     }
 
-    fn heres(rows: &[Row]) -> Vec<bool> {
+    fn placements(rows: &[Row]) -> Vec<Placement> {
         rows.iter()
             .filter_map(|r| match &r.content {
-                RowContent::Pane { here, .. } | RowContent::Agent { here, .. } => Some(*here),
+                RowContent::Pane { placement, .. } | RowContent::Agent { placement, .. } => {
+                    Some(*placement)
+                }
                 _ => None,
             })
             .collect()
@@ -529,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_active_windows_active_pane_is_here() {
+    fn a_child_is_placed_by_its_window_then_itself() {
         let tree = RowTree {
             sections: vec![Section {
                 heading: None,
@@ -540,12 +583,15 @@ mod tests {
                         vec![pane_child("%1", "0", true), pane_child("%2", "1", false)],
                     ),
                     // An inactive window still has an active pane; it is not
-                    // where you are.
+                    // where you are, and neither is anything else under it.
                     window_node(window_key("@2"), false, vec![pane_child("%3", "0", true)]),
                 ],
             }],
         };
-        assert_eq!(heres(&tree.flatten()), vec![true, false, false]);
+        assert_eq!(
+            placements(&tree.flatten()),
+            vec![Placement::Here, Placement::Focused, Placement::Unfocused]
+        );
     }
 
     #[test]
@@ -562,7 +608,7 @@ mod tests {
                 )],
             }],
         };
-        assert_eq!(heres(&tree.flatten()), vec![false]);
+        assert_eq!(placements(&tree.flatten()), vec![Placement::Focused]);
     }
 
     #[test]

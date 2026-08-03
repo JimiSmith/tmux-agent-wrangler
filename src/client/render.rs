@@ -14,7 +14,7 @@
 use ratatui::style::Style;
 
 use crate::daemon::rows::fit;
-use crate::model::{Branch, NamedColor, RowContent};
+use crate::model::{Branch, NamedColor, Placement, RowContent};
 
 use super::Colors;
 
@@ -76,7 +76,7 @@ enum Parts {
 /// and name. The icon sits with the name it labels rather than out at the
 /// margin, so the tree it hangs off reads as one unbroken structure.
 fn child_parts(
-    here: bool,
+    placement: Placement,
     icon: char,
     position: Branch,
     index: &str,
@@ -84,7 +84,11 @@ fn child_parts(
     color: Option<NamedColor>,
 ) -> Parts {
     Parts::Split {
-        head: format!("{} {}─ {index}: ", gutter(here), branch(position)),
+        head: format!(
+            "{} {}─ {index}: ",
+            gutter(placement.here()),
+            branch(position)
+        ),
         icon,
         // Two spaces, not one: the icons overhang the single column they are
         // declared as, and one space leaves the name touching the glyph.
@@ -102,23 +106,23 @@ fn parts(content: &RowContent) -> Parts {
         RowContent::Window {
             index,
             name,
-            active,
+            placement,
             ..
-        } => Parts::Whole(format!("{} {index}: {name}", gutter(*active))),
+        } => Parts::Whole(format!("{} {index}: {name}", gutter(placement.here()))),
         RowContent::Pane {
             index,
             title,
             branch,
-            here,
+            placement,
             color,
-        } => child_parts(*here, ICON_PANE, *branch, index, title, *color),
+        } => child_parts(*placement, ICON_PANE, *branch, index, title, *color),
         RowContent::Agent {
             index,
             label,
             branch,
-            here,
+            placement,
             color,
-        } => child_parts(*here, ICON_AGENT, *branch, index, label, *color),
+        } => child_parts(*placement, ICON_AGENT, *branch, index, label, *color),
         // No gutter and no branch: the entry hangs off nothing, and the area it
         // sits in is never where you are.
         RowContent::NotificationTitle { title, color } => Parts::Split {
@@ -206,7 +210,7 @@ pub fn fit_segments(segments: Vec<Segment>, field: usize) -> Vec<Segment> {
 /// The style a row's own text draws in, which the right-edge indicator inherits
 /// when it carries no state color of its own.
 ///
-/// The channels are kept apart: weight says where you are, and the kind icon
+/// The channels are kept apart: intensity says where you are, and the kind icon
 /// says what the row is. A child's color is deliberately absent here — it
 /// belongs to the icon, not the name — so only a window row styles its whole
 /// line with a color. Nothing here varies with a row's turn state, which the
@@ -215,21 +219,31 @@ pub fn base_style(content: &RowContent, colors: &Colors) -> Style {
     match content {
         RowContent::Header { .. } => Style::new().bold().underlined(),
         RowContent::Blank => Style::new().dim(),
-        RowContent::Window { active, color, .. } => own_color(weight(*active), colors, *color),
-        RowContent::Pane { here, .. } | RowContent::Agent { here, .. } => weight(*here),
+        RowContent::Window {
+            placement, color, ..
+        } => own_color(intensity(*placement), colors, *color),
+        RowContent::Pane { placement, .. } | RowContent::Agent { placement, .. } => {
+            intensity(*placement)
+        }
         RowContent::NotificationTitle { .. } => Style::new(),
         // Dimmed, so the title leads and the description reads as its detail.
-        // Weight is not available for that: it says where you are.
+        // Intensity is not available for that: it says where you are.
         RowContent::NotificationBody { .. } => Style::new().dim(),
     }
 }
 
-/// Bold for a row that is where you are, normal weight otherwise.
-fn weight(here: bool) -> Style {
-    if here {
-        Style::new().bold()
-    } else {
-        Style::new()
+/// How brightly a row draws, which is the one channel saying where you are: bold
+/// for the row you are on, dim for a window you are not in, and plain for the
+/// rest of the window you are in.
+///
+/// Dimming the whole of an unfocused window (its icons and its inherited
+/// indicators included) sets it behind the current window as a block, which is
+/// what makes the current window findable at a glance in a long list.
+fn intensity(placement: Placement) -> Style {
+    match placement {
+        Placement::Here => Style::new().bold(),
+        Placement::Focused => Style::new(),
+        Placement::Unfocused => Style::new().dim(),
     }
 }
 
@@ -246,31 +260,31 @@ mod tests {
     use super::*;
     use ratatui::style::Modifier;
 
-    fn window(index: &str, name: &str, active: bool) -> RowContent {
+    fn window(index: &str, name: &str, placement: Placement) -> RowContent {
         RowContent::Window {
             index: index.to_string(),
             name: name.to_string(),
-            active,
+            placement,
             color: None,
         }
     }
 
-    fn pane(index: &str, title: &str, position: Branch, here: bool) -> RowContent {
+    fn pane(index: &str, title: &str, position: Branch, placement: Placement) -> RowContent {
         RowContent::Pane {
             index: index.to_string(),
             title: title.to_string(),
             branch: position,
-            here,
+            placement,
             color: None,
         }
     }
 
-    fn agent(index: &str, label: &str, position: Branch, here: bool) -> RowContent {
+    fn agent(index: &str, label: &str, position: Branch, placement: Placement) -> RowContent {
         RowContent::Agent {
             index: index.to_string(),
             label: label.to_string(),
             branch: position,
-            here,
+            placement,
             color: None,
         }
     }
@@ -280,31 +294,35 @@ mod tests {
             index: "0".to_string(),
             label: "a".to_string(),
             branch: Branch::Last,
-            here: false,
+            placement: Placement::Focused,
             color: Some(color),
         }
     }
 
-    fn is_bold(content: &RowContent, colors: &Colors) -> bool {
-        base_style(content, colors)
-            .add_modifier
-            .contains(Modifier::BOLD)
+    fn has(content: &RowContent, colors: &Colors, modifier: Modifier) -> bool {
+        base_style(content, colors).add_modifier.contains(modifier)
     }
 
     #[test]
     fn a_window_row_leads_with_its_gutter() {
-        assert_eq!(row_text(&window("1", "editor", true)), "▌ 1: editor");
-        assert_eq!(row_text(&window("2", "shell", false)), "  2: shell");
+        assert_eq!(
+            row_text(&window("1", "editor", Placement::Here)),
+            "▌ 1: editor"
+        );
+        assert_eq!(
+            row_text(&window("2", "shell", Placement::Unfocused)),
+            "  2: shell"
+        );
     }
 
     #[test]
     fn a_child_row_is_indented_under_its_window() {
         assert_eq!(
-            row_text(&pane("0", "nvim", Branch::More, false)),
+            row_text(&pane("0", "nvim", Branch::More, Placement::Focused)),
             "  ├─ 0: \u{f489}  nvim"
         );
         assert_eq!(
-            row_text(&pane("1", "bash", Branch::Last, true)),
+            row_text(&pane("1", "bash", Branch::Last, Placement::Here)),
             "▌ └─ 1: \u{f489}  bash"
         );
     }
@@ -313,8 +331,8 @@ mod tests {
     fn a_pane_and_an_agent_land_in_the_same_columns() {
         // Swapping which of a window's panes runs an agent must not shift the
         // tree, so the two forms differ only in the icon and the name.
-        let pane_row = row_text(&pane("0", "name", Branch::Last, true));
-        let agent_row = row_text(&agent("0", "name", Branch::Last, true));
+        let pane_row = row_text(&pane("0", "name", Branch::Last, Placement::Here));
+        let agent_row = row_text(&agent("0", "name", Branch::Last, Placement::Here));
         assert_ne!(pane_row, agent_row);
         assert_eq!(pane_row.chars().count(), agent_row.chars().count());
         assert_eq!(
@@ -391,10 +409,69 @@ mod tests {
     #[test]
     fn only_a_row_you_are_on_is_bold() {
         let colors = Colors::new();
-        assert!(is_bold(&window("1", "w", true), &colors));
-        assert!(!is_bold(&window("1", "w", false), &colors));
-        assert!(is_bold(&pane("0", "p", Branch::Last, true), &colors));
-        assert!(!is_bold(&agent("0", "a", Branch::Last, false), &colors));
+        assert!(has(
+            &window("1", "w", Placement::Here),
+            &colors,
+            Modifier::BOLD
+        ));
+        assert!(!has(
+            &window("1", "w", Placement::Unfocused),
+            &colors,
+            Modifier::BOLD
+        ));
+        assert!(has(
+            &pane("0", "p", Branch::Last, Placement::Here),
+            &colors,
+            Modifier::BOLD
+        ));
+        assert!(!has(
+            &agent("0", "a", Branch::Last, Placement::Focused),
+            &colors,
+            Modifier::BOLD
+        ));
+    }
+
+    #[test]
+    fn only_a_window_you_are_not_in_is_dim() {
+        let colors = Colors::new();
+        // The whole of an unfocused window recedes: its window row and every
+        // child under it, whichever of them tmux calls active.
+        for content in [
+            window("2", "w", Placement::Unfocused),
+            pane("0", "p", Branch::Last, Placement::Unfocused),
+            agent("0", "a", Branch::More, Placement::Unfocused),
+        ] {
+            assert!(has(&content, &colors, Modifier::DIM), "{content:?}");
+        }
+        for content in [
+            window("1", "w", Placement::Here),
+            pane("0", "p", Branch::Last, Placement::Here),
+            agent("0", "a", Branch::More, Placement::Focused),
+        ] {
+            assert!(!has(&content, &colors, Modifier::DIM), "{content:?}");
+        }
+    }
+
+    #[test]
+    fn a_dimmed_rows_color_still_lands_on_its_icon_alone() {
+        // Dimming is the placement channel and the color the identity one, so an
+        // unfocused agent keeps its icon color rather than trading it for dim.
+        let colors = Colors::new();
+        let content = RowContent::Agent {
+            index: "0".to_string(),
+            label: "a".to_string(),
+            branch: Branch::Last,
+            placement: Placement::Unfocused,
+            color: Some(NamedColor::Cyan),
+        };
+        let segments = row_segments(&content, &colors);
+        assert!(segments[1].style.fg.is_some(), "the icon keeps its color");
+        assert!(
+            segments
+                .iter()
+                .all(|s| s.style.add_modifier.contains(Modifier::DIM)),
+            "every piece of the row is dimmed"
+        );
     }
 
     #[test]
@@ -412,8 +489,8 @@ mod tests {
     fn a_child_with_no_color_draws_entirely_in_the_default() {
         let colors = Colors::new();
         for content in [
-            agent("0", "a", Branch::Last, false),
-            pane("0", "p", Branch::Last, false),
+            agent("0", "a", Branch::Last, Placement::Focused),
+            pane("0", "p", Branch::Last, Placement::Focused),
         ] {
             for segment in row_segments(&content, &colors) {
                 assert!(segment.style.fg.is_none());
@@ -428,7 +505,7 @@ mod tests {
         let content = RowContent::Window {
             index: "1".to_string(),
             name: "w".to_string(),
-            active: false,
+            placement: Placement::Unfocused,
             color: Some(NamedColor::Red),
         };
         let segments = row_segments(&content, &colors);
@@ -439,15 +516,11 @@ mod tests {
     #[test]
     fn fitting_pads_the_last_segment_and_empties_the_others_from_the_right() {
         let colors = Colors::new();
-        let segments = row_segments(&agent("0", "a", Branch::Last, false), &colors);
-        let width = row_text(&agent("0", "a", Branch::Last, false))
-            .chars()
-            .count();
+        let row = agent("0", "a", Branch::Last, Placement::Focused);
+        let segments = row_segments(&row, &colors);
+        let width = row_text(&row).chars().count();
 
-        let padded = fit_segments(
-            row_segments(&agent("0", "a", Branch::Last, false), &colors),
-            width + 3,
-        );
+        let padded = fit_segments(row_segments(&row, &colors), width + 3);
         let texts: Vec<String> = padded.iter().map(|s| s.text.clone()).collect();
         assert_eq!(texts[0], "  └─ 0: ", "the tree is untouched");
         assert_eq!(texts[1], "\u{f167a}", "the icon keeps its own segment");

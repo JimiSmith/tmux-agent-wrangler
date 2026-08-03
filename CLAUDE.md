@@ -156,8 +156,10 @@ runtime; the concurrency model is the same either way.
 
 - **`RowTree::flatten` (`src/model.rs`)** — linearises the tree into display
   rows, deriving the two things that follow from a node's *position*: its
-  `Branch`, and `here` (`window.active && child.active`, so the active pane of a
-  window you are not in does not qualify). Both ends run it — the daemon to
+  `Branch`, and its `Placement` — `Here` (the active pane of the active window,
+  or that window itself), `Focused` (elsewhere in that window) or `Unfocused`
+  (under a window you are not in), which is the one value the client reads both
+  the gutter and the row's intensity off. Both ends run it — the daemon to
   resolve the selection, the client to paint — so nav order and paint order are
   the same order by construction. The notification area rides in the `RowModel`
   beside the tree rather than inside it: it is a second region, pinned to the
@@ -176,19 +178,25 @@ runtime; the concurrency model is the same either way.
   `row_segments` styles it, which is the split's reason to exist: **a child's color goes on its icon and nothing
   else**, because a list of full-width colored rows is unreadable and the icon
   alone ties a row to its thing. Only a window row, having no icon, colors its
-  whole line. `base_style` therefore carries weight (where you are) but no
+  whole line. `base_style` therefore carries intensity (where you are) but no
   child color; `fit_segments` fits the run to the pane width, emptying segments
   from the right and padding the last one so the selection bar spans the width.
-  The bar (`selection_bar` in `client/mod.rs`) drops the color of everything it
-  covers: under reverse video a foreground color becomes the background, so a
-  colored icon or indicator would paint a block of color across the selected
-  row.
+  Intensity is the one channel for placement, read straight off it: bold for the
+  row you are on, dim for every row of a window you are not in — icons and
+  inherited indicators included, so an unfocused window recedes as a block and
+  the current one is findable at a glance — and plain for the rest of the window
+  you are in.
+  The bar (`selection_bar` in `client/mod.rs`) drops the color and the dimming of
+  everything it covers: under reverse video both land on what is now the
+  background, so a colored icon would paint a block of color across the selected
+  row and a dimmed one would wash it out — and since pointing at another window
+  is what the sidebar is for, the selected row is usually a dimmed one.
   Turn state is left entirely to the right-edge indicator, which inherits
   `base_style` when it has no state color of its own. A notification entry is two
   contents: a title row drawn as an agent row stripped of the tree (same icon
   column carrying the same color, no gutter, branch or index, because it hangs
   off no window) over dimmed description rows indented to the title's text —
-  dimmed and not lightened, because weight is the "where you are" channel and is
+  dimmed and not lightened, because bold is the "where you are" channel and is
   not available to say "detail".
   `notification_lines` (`client/mod.rs`) builds those rows and so decides the
   split between the two regions: it wraps each description to

@@ -451,7 +451,7 @@ mod tests {
     use super::*;
     use crate::client::render::row_text;
     use crate::fixtures;
-    use crate::model::{Branch, NamedColor, Row, RowContent, SessionKey, WindowId};
+    use crate::model::{Branch, NamedColor, Placement, Row, RowContent, SessionKey, WindowId};
     use serde_json::Value;
 
     /// The lines a built tree draws, which is what the fixtures pin. Composing
@@ -780,7 +780,7 @@ mod tests {
                 index: "1".into(),
                 title: "nvim".into(),
                 branch: Branch::More,
-                here: true,
+                placement: Placement::Here,
                 color: None,
             },
             "the agent-free pane is untouched, and is where you are"
@@ -798,7 +798,7 @@ mod tests {
                 index: "2".into(),
                 label: "Fix the bug".into(),
                 branch: Branch::Last,
-                here: false,
+                placement: Placement::Focused,
                 color: None,
             }
         );
@@ -932,7 +932,13 @@ mod tests {
             }
         );
         assert!(
-            matches!(rows[1].content, RowContent::Agent { here: false, .. }),
+            matches!(
+                rows[1].content,
+                RowContent::Agent {
+                    placement: Placement::Focused,
+                    ..
+                }
+            ),
             "the turn state rides on the indicator, not the row content"
         );
     }
