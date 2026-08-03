@@ -157,16 +157,32 @@ fn backup_path(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// The directory `path` is written in: its parent, or the working directory when
+/// it has none.
+fn parent_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+/// The sibling temp file [`atomic_write`] renames over `path`.
+///
+/// Named after the file it becomes as well as the writing process: two targets
+/// sharing a directory are written by the same pid whenever one process installs
+/// both, so the pid alone does not make the name unique and the two writes would
+/// otherwise trample each other's temp file.
+fn temp_path(path: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from(format!(".wrangler-hooks-tmp-{}-", std::process::id()));
+    name.push(path.file_name().unwrap_or_default());
+    parent_dir(path).join(name)
+}
+
 /// Replace `path`'s contents atomically, creating parents, with permission bits
 /// `mode`: write a sibling temp file, set its mode, then rename over `path`.
 fn atomic_write(path: &Path, text: &str, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let dir = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".wrangler-hooks-tmp-{}", std::process::id()));
+    fs::create_dir_all(parent_dir(path))?;
+    let tmp = temp_path(path);
     let result = (|| {
         fs::write(&tmp, text)?;
         fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
@@ -481,6 +497,19 @@ mod tests {
 
     fn tmp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("wrangler-install-{}-{}", std::process::id(), name))
+    }
+
+    #[test]
+    fn two_targets_in_one_directory_get_different_temp_files() {
+        // The temp file is what a concurrent write to a sibling target would
+        // trample, taking that write's content and mode with it.
+        let dir = std::env::temp_dir();
+        assert_ne!(
+            temp_path(&dir.join("settings.json")),
+            temp_path(&dir.join("wrangler.json"))
+        );
+        // And it stays in the target's own directory, so the rename is a rename.
+        assert_eq!(temp_path(&dir.join("settings.json")).parent(), Some(&*dir));
     }
 
     #[test]
