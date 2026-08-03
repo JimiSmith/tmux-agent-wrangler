@@ -54,8 +54,9 @@ run-shell /path/to/tmux-agent-wrangler/wrangler.tmux
 
 - `prefix + Tab` — toggle the sidebar
 - `prefix + a` — focus this window's sidebar (no-op if the sidebar is off)
-- `Up`/`Down` or `k`/`j` — move the highlight between windows
-- `Enter` — focus the highlighted window
+- `Up`/`Down` or `k`/`j` — move the highlight between rows, the notification
+  area included
+- `Enter` — focus the highlighted window, or open the highlighted notification
 - mouse click on a window line — focus it
 - `q` — close the sidebar
 
@@ -265,6 +266,7 @@ set -g @wrangler-sections off  # separate WINDOWS/CLAUDE/COPILOT sections ('on' 
 set -g @wrangler-hook-progress on  # spinner/● working/attention indicators from agent hooks ('off' to disable)
 set -g @wrangler-osc-progress off  # OSC 9;4 progress % reported by panes ('on' to enable)
 set -g @wrangler-osc-notify off    # desktop notification when an agent needs attention: 'off' | '777' (or 'on') | '9'
+set -g @wrangler-notifications on  # notification area at the foot of the sidebar ('off' to disable)
 ```
 
 By default the sidebar is one window list: every window with its panes beneath
@@ -336,6 +338,36 @@ attention, so they reach you whether or not the sidebar is showing. They fire
 for every attention event regardless of which pane is focused: pane focus says
 nothing about whether the terminal itself is visible. The `●` indicator still
 clears when you focus the agent's pane.
+
+`@wrangler-notifications` (default on) collects those same attention events into
+a `NOTIFICATIONS` area at the foot of the sidebar, newest first, holding the
+three most recent. It is driven by the event itself, so it fills up whether or
+not the desktop notification and the bell are enabled.
+
+An entry carries the title and message the desktop notification would have
+shown: the agent name, then `<window> · <label>` beneath it, wrapped over as
+many lines as the sidebar's width needs rather than cut off.
+
+```
+ NOTIFICATIONS
+ 󱙺 claude
+   vim ·
+   api-service-gateway
+```
+
+The area appears only when something is in it, takes just the rows it needs, and
+never grows past a quarter of the pane. An entry goes in only if it fits whole,
+so you never get a title over a truncated message; on a short sidebar it is the
+oldest entries that give way.
+
+Its entries are rows like any other: `j`/`k` walks off the bottom of the tree
+into them and `Enter` opens one, as does a click anywhere on it. Opening an entry
+jumps to the pane the agent is in *now* (a session that has moved since it called
+still lands right) and dismisses the whole area, on every sidebar of that server.
+An entry also clears when you focus the pane it points at, alongside that pane's
+`●`: you are looking at the agent, so its call has been answered. An event raised
+by the pane you are already sitting in never reaches the area at all. Otherwise
+an entry stays until a newer one pushes it out.
 
 For the selection highlight to follow focus the moment it changes rather than
 on the sidebar's 1s poll, enable tmux's built-in focus reporting yourself:

@@ -35,10 +35,14 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use ratatui::Terminal;
 
+use crate::client::render::notification_body_field;
 use crate::client::render::{base_style, fit_segments, row_segments};
 use crate::color::{agent_color_table, claude_dir, read_theme};
 use crate::daemon::rows::StateColor;
-use crate::model::{NamedColor, PaneId, Row, RowKey, RowModel, ServerKey, WindowId};
+use crate::model::{
+    notification_ids, Indicator, NamedColor, NotificationNode, PaneId, Row, RowContent, RowKey,
+    RowModel, ServerKey, WindowId,
+};
 use crate::paths::daemon_socket;
 use crate::proto::{read_message, write_message, ClientMsg, CtlMsg, InputEvent, ServerMsg};
 
@@ -143,7 +147,10 @@ fn render_line(
 }
 
 /// A pushed model with its tree already flattened, so the paint loop walks the
-/// rows rather than the tree on every frame.
+/// rows rather than the tree on every frame. The notification area is not
+/// flattened here: an entry's height depends on the width its description wraps
+/// to, so its rows are built by the paint. What is fixed is the order of its
+/// entries, which is what navigation runs on.
 struct View {
     model: RowModel,
     rows: Vec<Row>,
@@ -156,14 +163,114 @@ impl View {
     }
 }
 
-/// Paint the view, scrolling so the selected row stays visible. `offset` is the
-/// scroll position, carried between frames.
+/// The heading drawn above the notification area.
+const NOTIFICATIONS_HEADING: &str = "notifications";
+
+/// How the last frame was laid out: the rows given to the tree, and the
+/// notification area exactly as it was drawn. The paint records it so a click
+/// resolves against the lines it landed on rather than a re-derived layout.
+#[derive(Clone, Debug, Default)]
+struct Layout {
+    tree_height: usize,
+    notif: Vec<Row>,
+}
+
+/// Wrap `text` to `field` columns, breaking on spaces and hard-splitting a word
+/// too long to fit one. Never returns an empty run, so an entry always draws at
+/// least one description line.
+fn wrap(text: &str, field: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word;
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() <= field {
+            line.push(' ');
+            line.push_str(word);
+            continue;
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        // A word wider than the field is cut across as many lines as it takes.
+        while word.chars().count() > field {
+            let head: String = word.chars().take(field).collect();
+            let cut = head.len();
+            lines.push(head);
+            word = &word[cut..];
+        }
+        line.push_str(word);
+    }
+    lines.push(line);
+    lines
+}
+
+/// The notification area's rows for a pane `width` columns wide, given at most
+/// `cap` of them: the heading, then each entry as its title over its wrapped
+/// description.
+///
+/// An entry is laid in only if it fits whole, so the area never shows a title
+/// over a cut-off description; the newest go in first, so a short area is the
+/// oldest entries that give way. Nothing at all comes back when the cap leaves
+/// no room for an entry beside the heading — a heading over nothing costs a row
+/// and says less than the tree it displaced.
+fn notification_lines(nodes: &[NotificationNode], width: usize, cap: usize) -> Vec<Row> {
+    if nodes.is_empty() || cap < 2 {
+        return Vec::new();
+    }
+    let mut rows = vec![plain_row(RowContent::Header {
+        text: NOTIFICATIONS_HEADING.to_string(),
+    })];
+    for node in nodes {
+        let mut entry = vec![Row {
+            content: RowContent::NotificationTitle {
+                title: node.title.clone(),
+                color: node.color,
+            },
+            id: Some(node.id.clone()),
+            indicator: Indicator::None,
+        }];
+        entry.extend(
+            wrap(&node.body, notification_body_field(width))
+                .into_iter()
+                .map(|text| Row {
+                    content: RowContent::NotificationBody { text },
+                    // Every line of an entry answers to the entry, so a click
+                    // anywhere in it opens the same thing.
+                    id: Some(node.id.clone()),
+                    indicator: Indicator::None,
+                }),
+        );
+        if rows.len() + entry.len() > cap {
+            break;
+        }
+        rows.extend(entry);
+    }
+    if rows.len() < 2 {
+        return Vec::new();
+    }
+    rows
+}
+
+/// A row that is drawn but not selectable: the area's heading.
+fn plain_row(content: RowContent) -> Row {
+    Row {
+        content,
+        id: None,
+        indicator: Indicator::None,
+    }
+}
+
+/// Paint the view, scrolling the tree so the selected row stays visible and
+/// pinning the notification area to the foot of the pane. `offset` is the tree's
+/// scroll position and `place` the height split, both carried between frames —
+/// `place` so a click can be resolved against the frame it hit.
 fn render(
     frame_ui: &mut ratatui::Frame,
     view: &View,
     colors: &Colors,
     frame: usize,
     offset: &mut usize,
+    place: &mut Layout,
 ) {
     let area = frame_ui.area();
     let width = area.width as usize;
@@ -171,31 +278,51 @@ fn render(
     if width == 0 || height == 0 {
         return;
     }
+    // A quarter of the pane is the area's ceiling; the tree keeps the rest.
+    place.notif = notification_lines(&view.model.notifications, width, height / 4);
+    place.tree_height = height - place.notif.len();
+    let tree_height = place.tree_height;
 
     let selection = view.model.selection.as_ref();
-    let sel_row = selection
-        .and_then(|k| view.rows.iter().position(|r| r.id.as_ref() == Some(k)))
-        .unwrap_or(0);
     let mut off = *offset;
-    if sel_row < off {
-        off = sel_row;
-    } else if height > 0 && sel_row >= off + height {
-        off = sel_row - height + 1;
+    // A selected notification is always on screen, so only a selection in the
+    // tree moves the tree's scroll.
+    if let Some(sel_row) =
+        selection.and_then(|k| view.rows.iter().position(|r| r.id.as_ref() == Some(k)))
+    {
+        if sel_row < off {
+            off = sel_row;
+        } else if tree_height > 0 && sel_row >= off + tree_height {
+            off = sel_row - tree_height + 1;
+        }
     }
-    off = off.min(view.rows.len().saturating_sub(height));
+    off = off.min(view.rows.len().saturating_sub(tree_height));
     *offset = off;
 
+    let selected =
+        |row: &Row| view.model.has_focus && row.id.is_some() && row.id.as_ref() == selection;
     let mut lines = Vec::new();
-    for row in view.rows.iter().skip(off).take(height) {
-        let selected = view.model.has_focus && row.id.is_some() && row.id.as_ref() == selection;
-        lines.push(render_line(row, colors, width, frame, selected));
+    for row in view.rows.iter().skip(off).take(tree_height) {
+        lines.push(render_line(row, colors, width, frame, selected(row)));
+    }
+    // A tree shorter than its region is padded out, so the notification area
+    // stays at the foot of the pane rather than riding up under the last window.
+    lines.resize(tree_height, Line::default());
+    for row in &place.notif {
+        lines.push(render_line(row, colors, width, frame, selected(row)));
     }
     frame_ui.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
-/// The selectable rows' ids in display order.
+/// The selectable rows' ids in display order: the tree, then the notification
+/// area beneath it, so navigation runs off the end of one into the other. An
+/// entry appears once however many lines it is drawn on.
 fn selectable_ids(view: &View) -> Vec<RowKey> {
-    view.rows.iter().filter_map(|r| r.id.clone()).collect()
+    view.rows
+        .iter()
+        .filter_map(|r| r.id.clone())
+        .chain(notification_ids(&view.model.notifications))
+        .collect()
 }
 
 /// The id `delta` steps from the current selection among the selectable rows,
@@ -215,9 +342,16 @@ fn neighbor_id(view: &View, delta: isize) -> Option<RowKey> {
     Some(ids[next].clone())
 }
 
-/// The id of the selectable row at display line `line` (accounting for scroll).
-fn id_at_line(view: &View, offset: usize, line: usize) -> Option<RowKey> {
-    view.rows.get(offset + line).and_then(|r| r.id.clone())
+/// The id of the selectable row at display line `line` of the frame `place`
+/// describes: a line in the tree region indexes the scrolled tree, one below it
+/// indexes the notification area, which does not scroll.
+fn id_at_line(view: &View, offset: usize, place: &Layout, line: usize) -> Option<RowKey> {
+    let row = if line < place.tree_height {
+        view.rows.get(offset + line)
+    } else {
+        place.notif.get(line - place.tree_height)
+    };
+    row.and_then(|r| r.id.clone())
 }
 
 /// A message from the reader thread: a decoded server push, or the connection
@@ -529,6 +663,7 @@ fn event_loop(
 ) -> io::Result<()> {
     let start = Instant::now();
     let mut offset = 0usize;
+    let mut place = Layout::default();
     let mut view: Option<View> = None;
 
     let (bounds, sync) = read_width_options(&ctx.server.0);
@@ -538,7 +673,7 @@ fn event_loop(
     loop {
         let frame = (start.elapsed().as_secs_f64() / ANIM_INTERVAL) as usize;
         if let Some(v) = &view {
-            terminal.draw(|f| render(f, v, colors, frame, &mut offset))?;
+            terminal.draw(|f| render(f, v, colors, frame, &mut offset, &mut place))?;
         } else {
             terminal.draw(|f| {
                 let area = f.area();
@@ -619,7 +754,7 @@ fn event_loop(
             Event::Mouse(m) => {
                 if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                     if let Some(v) = &view {
-                        if let Some(key) = id_at_line(v, offset, m.row as usize) {
+                        if let Some(key) = id_at_line(v, offset, &place, m.row as usize) {
                             send(
                                 conn,
                                 &ClientMsg::Input {
@@ -669,12 +804,17 @@ fn event_loop(
 mod tests {
     use super::*;
     use crate::model::{
-        Branch, Child, Indicator, ProgressState, RowContent, RowTree, Section, SessionKey,
-        WindowNode,
+        Branch, Child, Indicator, NotificationNode, ProgressState, RowContent, RowTree, Section,
+        SessionKey, WindowNode,
     };
     use ratatui::backend::TestBackend;
 
     fn sample_view() -> View {
+        view_with(Vec::new())
+    }
+
+    /// The sample view with `notifications` in the area beneath its tree.
+    fn view_with(notifications: Vec<NotificationNode>) -> View {
         View::new(RowModel {
             tree: RowTree {
                 sections: vec![Section {
@@ -701,6 +841,7 @@ mod tests {
                     }],
                 }],
             },
+            notifications,
             selection: Some(RowKey::Window {
                 window: WindowId("@0".into()),
             }),
@@ -708,29 +849,132 @@ mod tests {
         })
     }
 
-    #[test]
-    fn renders_model_to_a_buffer() {
+    fn notification(session: &str, body: &str) -> NotificationNode {
+        NotificationNode {
+            id: RowKey::Notification {
+                session: SessionKey(session.into()),
+            },
+            title: "claude".into(),
+            body: body.into(),
+            color: None,
+        }
+    }
+
+    /// The kind and text of each row, which is what a layout assertion is about.
+    fn shape(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .map(|r| match &r.content {
+                RowContent::Header { text } => format!("header:{text}"),
+                RowContent::NotificationTitle { title, .. } => format!("title:{title}"),
+                RowContent::NotificationBody { text } => format!("body:{text}"),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// The `height` lines a view paints into a pane `width` columns wide.
+    fn painted(view: &View, width: u16, height: u16) -> Vec<String> {
         let colors = Colors::new();
-        let view = sample_view();
-        let backend = TestBackend::new(24, 6);
+        let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut offset = 0;
+        let mut place = Layout::default();
         terminal
-            .draw(|f| render(f, &view, &colors, 0, &mut offset))
+            .draw(|f| render(f, view, &colors, 0, &mut offset, &mut place))
             .unwrap();
-
         let buffer = terminal.backend().buffer();
-        let mut text = String::new();
-        for y in 0..6 {
-            for x in 0..24 {
-                text.push_str(buffer[(x, y)].symbol());
-            }
-            text.push('\n');
-        }
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn renders_model_to_a_buffer() {
+        let text = painted(&sample_view(), 24, 6).join("\n");
         // The header, the window row, and the attention dot all painted.
         assert!(text.contains("WINDOWS"), "header present:\n{text}");
         assert!(text.contains("0: main"), "window row present:\n{text}");
         assert!(text.contains('●'), "attention dot present:\n{text}");
+    }
+
+    #[test]
+    fn the_notification_area_sits_at_the_foot_of_the_pane() {
+        // Two one-line entries plus their heading are 5 rows, inside a quarter of
+        // 24: the area is drawn whole, flush with the bottom and below a tree
+        // that does not reach it.
+        let view = view_with(vec![
+            notification("claude-a", "vim · newest"),
+            notification("claude-b", "server · older"),
+        ]);
+        let lines = painted(&view, 24, 24);
+        assert!(lines[19].contains("NOTIFICATIONS"), "{lines:#?}");
+        assert!(lines[20].contains("claude"), "{lines:#?}");
+        assert!(lines[21].contains("vim · newest"), "{lines:#?}");
+        assert!(lines[23].contains("server · older"), "{lines:#?}");
+    }
+
+    #[test]
+    fn an_entry_is_its_title_over_its_description() {
+        assert_eq!(
+            shape(&notification_lines(
+                &[notification("claude-a", "vim · api")],
+                24,
+                8
+            )),
+            vec!["header:notifications", "title:claude", "body:vim · api"]
+        );
+    }
+
+    #[test]
+    fn a_description_too_wide_for_the_pane_wraps_rather_than_truncating() {
+        let rows = notification_lines(
+            &[notification("claude-a", "vim · api-service-gateway")],
+            24,
+            8,
+        );
+        assert_eq!(
+            shape(&rows),
+            vec![
+                "header:notifications",
+                "title:claude",
+                "body:vim ·",
+                "body:api-service-gateway",
+            ]
+        );
+        assert!(
+            rows[2].id == rows[3].id && rows[3].id == rows[1].id,
+            "every line of an entry answers to the entry"
+        );
+    }
+
+    #[test]
+    fn the_area_takes_only_entries_that_fit_whole() {
+        let nodes = [
+            notification("claude-a", "newest"),
+            notification("claude-b", "older"),
+        ];
+        // Four rows hold the heading and both entries.
+        assert_eq!(notification_lines(&nodes, 24, 5).len(), 5);
+        // Four leave the second entry a title with no room for its description,
+        // so it is left out whole rather than cut.
+        assert_eq!(
+            shape(&notification_lines(&nodes, 24, 4)),
+            vec!["header:notifications", "title:claude", "body:newest"]
+        );
+        // Two cannot hold one entry, so the area is dropped and the tree keeps
+        // the rows.
+        assert!(notification_lines(&nodes, 24, 2).is_empty());
+        assert!(notification_lines(&nodes, 24, 1).is_empty());
+        assert!(notification_lines(&[], 24, 20).is_empty());
+    }
+
+    #[test]
+    fn wrapping_breaks_on_spaces_and_splits_a_word_too_long_to_fit() {
+        assert_eq!(wrap("a b c", 5), vec!["a b c"]);
+        assert_eq!(wrap("aaa bbb ccc", 7), vec!["aaa bbb", "ccc"]);
+        assert_eq!(wrap("aaaaaaaa", 3), vec!["aaa", "aaa", "aa"]);
+        // Multi-byte characters are counted, not their bytes.
+        assert_eq!(wrap("··· ···", 3), vec!["···", "···"]);
     }
 
     #[test]
@@ -789,6 +1033,20 @@ mod tests {
                 window: WindowId("@0".into())
             }
         );
+    }
+
+    #[test]
+    fn navigation_runs_off_the_tree_into_the_notification_area() {
+        let view = view_with(vec![notification("claude-a", "one")]);
+        // The tree's last row is the agent; one more step reaches the entry
+        // beneath it, and a further step clamps there.
+        assert_eq!(
+            neighbor_id(&view, 2),
+            Some(RowKey::Notification {
+                session: SessionKey("claude-a".into())
+            })
+        );
+        assert_eq!(neighbor_id(&view, 3), neighbor_id(&view, 2));
     }
 
     /// The default bounds: a floor of 24 and no ceiling.
@@ -858,18 +1116,45 @@ mod tests {
         assert_eq!(w.on_shared_width(50), None);
     }
 
+    /// The layout of a `height`-line pane 24 columns wide holding `view`.
+    fn placed(view: &View, height: usize) -> Layout {
+        let notif = notification_lines(&view.model.notifications, 24, height / 4);
+        Layout {
+            tree_height: height - notif.len(),
+            notif,
+        }
+    }
+
     #[test]
     fn id_at_line_indexes_selectable_rows() {
         let view = sample_view();
+        let place = placed(&view, 16);
         // Line 0 is the heading (no id); line 1 is its blank; line 2 is the
         // window row.
-        assert_eq!(id_at_line(&view, 0, 0), None);
-        assert_eq!(id_at_line(&view, 0, 1), None);
+        assert_eq!(id_at_line(&view, 0, &place, 0), None);
+        assert_eq!(id_at_line(&view, 0, &place, 1), None);
         assert_eq!(
-            id_at_line(&view, 0, 2),
+            id_at_line(&view, 0, &place, 2),
             Some(RowKey::Window {
                 window: WindowId("@0".into())
             })
         );
+    }
+
+    #[test]
+    fn a_click_anywhere_in_an_entry_opens_it() {
+        let view = view_with(vec![notification("claude-a", "vim · api")]);
+        // A 16-line pane: the heading, the title and the description take the
+        // last three lines, whatever the tree above them is doing.
+        let place = placed(&view, 16);
+        assert_eq!(place.tree_height, 13);
+        assert_eq!(id_at_line(&view, 0, &place, 13), None, "the heading");
+        let entry = Some(RowKey::Notification {
+            session: SessionKey("claude-a".into()),
+        });
+        assert_eq!(id_at_line(&view, 0, &place, 14), entry, "its title");
+        assert_eq!(id_at_line(&view, 0, &place, 15), entry, "its description");
+        // The padding between a short tree and the area names no row.
+        assert_eq!(id_at_line(&view, 0, &place, 12), None);
     }
 }

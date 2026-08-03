@@ -16,12 +16,14 @@ use std::collections::HashMap;
 use indexmap::{IndexMap, IndexSet};
 
 use crate::daemon::assoc::{fetch_agent_sessions, RegistryRecord, RegistrySession};
-use crate::daemon::notify::{acknowledge_focused_attention, osc_escape, Notifier, OscNotify};
+use crate::daemon::notify::{
+    acknowledge_focused_attention, notification_text, osc_escape, Notifier, OscNotify,
+};
 use crate::daemon::rows::build_tree;
 use crate::labels::{label_mode_from, LabelCache};
 use crate::model::{
-    PaneId, RowContent, RowKey, RowModel, RowTree, ServerKey, Session, TurnStatus, ViewMode,
-    Window, WindowId,
+    notification_ids, NamedColor, NotificationNode, PaneId, RowContent, RowKey, RowModel, RowTree,
+    ServerKey, Session, SessionKey, TurnStatus, ViewMode, Window, WindowId,
 };
 use crate::proto::{HookAction, InputEvent, ServerMsg};
 
@@ -66,12 +68,33 @@ pub struct RegistryEntry {
     pub attention_token: Option<i128>,
 }
 
-/// Per-server shared UI state: the highlighted row and the column width sidebars
-/// on this server keep in sync. Both are absent until a client sets them.
+/// How many attention events the notification area holds. Older ones are pushed
+/// out: the area is the recent past, not a log.
+const NOTIFICATION_LIMIT: usize = 3;
+
+/// One attention event held in the notification area, keyed by the session it
+/// came from (one entry per session). `pane` is where that session is displayed
+/// and `body` how the event reads *now*, both re-read on every poll, so opening
+/// the entry lands where the agent currently is rather than where it was when
+/// the event fired.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Notification {
+    pub session: SessionKey,
+    pub pane: PaneId,
+    /// The agent kind, which titles the entry.
+    pub agent: String,
+    pub body: String,
+    pub color: Option<NamedColor>,
+}
+
+/// Per-server shared UI state: the highlighted row, the column width sidebars on
+/// this server keep in sync, and the notification area's entries (newest first).
+/// The selection and width are absent until a client sets them.
 #[derive(Clone, Debug, Default)]
 pub struct ServerState {
     pub selection: Option<RowKey>,
     pub width: Option<u16>,
+    pub notifications: Vec<Notification>,
 }
 
 /// A connected sidebar client: which window's sidebar it is, on which server, its
@@ -170,18 +193,26 @@ fn window_has_no_real_panes(window: &WindowId, windows: &[Window]) -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve the shared selection against the tree just built: keep the current id
+/// Resolve the shared selection against the rows just built: keep the current id
 /// if it still names a row, else default to the active window's row, else the
 /// first selectable row, else `None` when nothing is selectable.
 ///
-/// Resolving against the flattened tree is what keeps the selection in the order
-/// a sidebar navigates and paints in.
-fn resolve_selection(current: Option<&RowKey>, tree: &RowTree) -> Option<RowKey> {
+/// Resolving against the flattened rows is what keeps the selection in the order
+/// a sidebar navigates and paints in. The notification entries are part of that
+/// order (they are navigable), so a selected entry survives a repoll and one
+/// that has been opened or pushed out falls back like any vanished row.
+fn resolve_selection(
+    current: Option<&RowKey>,
+    tree: &RowTree,
+    notifications: &[NotificationNode],
+) -> Option<RowKey> {
     let rows = tree.flatten();
-    let first_id = rows.iter().find_map(|r| r.id.as_ref());
+    let notif_ids = notification_ids(notifications);
+    let ids = || rows.iter().filter_map(|r| r.id.as_ref()).chain(&notif_ids);
+    let first_id = ids().next();
     first_id?;
     if let Some(k) = current {
-        if rows.iter().any(|r| r.id.as_ref() == Some(k)) {
+        if ids().any(|id| id == k) {
             return Some(k.clone());
         }
     }
@@ -349,10 +380,18 @@ impl State {
                 self.poll_server(env, &server, &parents, &mut pushes);
             }
             InputEvent::Activate { key } => {
+                self.activate(env, &server, &key);
                 if let Some(s) = self.servers.get_mut(&server) {
                     s.selection = Some(key.clone());
+                    // Opening one notification dismisses the area: it has served
+                    // its purpose, and leaving the rest behind would keep a row
+                    // that is no longer news. The selection then names a row that
+                    // is gone, so the repoll below falls it back into the tree —
+                    // onto the window just jumped to.
+                    if matches!(key, RowKey::Notification { .. }) {
+                        s.notifications.clear();
+                    }
                 }
-                self.activate(env, &server, &key);
                 let parents = env.ppid_map();
                 self.poll_server(env, &server, &parents, &mut pushes);
             }
@@ -395,18 +434,30 @@ impl State {
     }
 
     /// Focus the tmux target a selected row names: a window row selects the
-    /// window; a pane or agent row selects that pane within its window.
+    /// window; a pane, agent or notification row selects that pane within its
+    /// window. A notification names its pane through the entry the daemon holds,
+    /// which the poll keeps current.
     fn activate<E: TmuxEnv>(&self, env: &E, server: &ServerKey, key: &RowKey) {
         let fetch = env.fetch_windows(&server.0);
-        match key {
+        let pane = match key {
             RowKey::Window { window } | RowKey::AgentWindow { window, .. } => {
                 env.focus(&server.0, &window.0, None);
+                return;
             }
-            RowKey::Pane { pane } | RowKey::Agent { pane, .. } => {
-                if let Some(window) = fetch.pane_to_window.get(pane) {
-                    env.focus(&server.0, &window.0, Some(&pane.0));
-                }
+            RowKey::Pane { pane } | RowKey::Agent { pane, .. } => pane.clone(),
+            RowKey::Notification { session } => {
+                let Some(n) = self
+                    .servers
+                    .get(server)
+                    .and_then(|s| s.notifications.iter().find(|n| &n.session == session))
+                else {
+                    return;
+                };
+                n.pane.clone()
             }
+        };
+        if let Some(window) = fetch.pane_to_window.get(&pane) {
+            env.focus(&server.0, &window.0, Some(&pane.0));
         }
     }
 
@@ -442,6 +493,7 @@ impl State {
         let osc_on = opt_enabled_default_off(&env.option(&server.0, "@wrangler-osc-progress"));
         let bell_on = opt_enabled_default_off(&env.option(&server.0, "@wrangler-bell"));
         let notify_mode = osc_notify_mode(&env.option(&server.0, "@wrangler-osc-notify"));
+        let notif_on = opt_enabled_default_on(&env.option(&server.0, "@wrangler-notifications"));
         let label_mode = label_mode_from(&env.option(&server.0, "@wrangler-label"));
         let view_mode = view_mode_from(&env.option(&server.0, "@wrangler-sections"));
 
@@ -483,7 +535,16 @@ impl State {
             }
         }
 
-        self.signal_attention(env, server, &fetch.windows, &sessions, bell_on, notify_mode);
+        self.signal_attention(
+            env,
+            server,
+            &fetch.windows,
+            &sessions,
+            bell_on,
+            notify_mode,
+            notif_on,
+        );
+        self.refresh_notifications(server, &fetch.windows, &sessions, notif_on);
 
         // Clear attention for a session whose pane is now the focused one, so the
         // dot goes on the next poll (this poll's rows still show it, matching the
@@ -499,6 +560,7 @@ impl State {
                 e.attention_token = None;
             }
         }
+        self.clear_focused_notifications(server, &focused_panes);
 
         let pane_status = pane_status_map(&sessions);
         let tree = build_tree(
@@ -511,8 +573,13 @@ impl State {
             view_mode,
         );
 
+        let notifications = self
+            .servers
+            .get(server)
+            .map(|s| notification_nodes(&s.notifications))
+            .unwrap_or_default();
         let current = self.servers.get(server).and_then(|s| s.selection.clone());
-        let selection = resolve_selection(current.as_ref(), &tree);
+        let selection = resolve_selection(current.as_ref(), &tree, &notifications);
         if let Some(s) = self.servers.get_mut(server) {
             s.selection = selection.clone();
         }
@@ -534,6 +601,7 @@ impl State {
             let has_focus = window_focus(&window, &fetch.windows);
             let model = RowModel {
                 tree: tree.clone(),
+                notifications: notifications.clone(),
                 selection: selection.clone(),
                 has_focus,
             };
@@ -545,10 +613,13 @@ impl State {
         }
     }
 
-    /// Ring the bell and raise the desktop notification once per attention event.
-    /// One representative placement per session is chosen, preferring the one
-    /// under the active window (whose name titles the notification); the dedup is
-    /// the notifier's per-session token check.
+    /// Ring the bell, raise the desktop notification and record the notification
+    /// area's entry, once per attention event. One representative placement per
+    /// session is chosen, preferring the one under the active window (whose name
+    /// titles the notification); the dedup is the notifier's per-session token
+    /// check, shared by all three sinks so they can never disagree about what
+    /// fired.
+    #[allow(clippy::too_many_arguments)]
     fn signal_attention<E: TmuxEnv>(
         &mut self,
         env: &E,
@@ -557,8 +628,9 @@ impl State {
         sessions: &[Session],
         bell_on: bool,
         notify_mode: Option<OscNotify>,
+        notif_on: bool,
     ) {
-        if !bell_on && notify_mode.is_none() {
+        if !bell_on && notify_mode.is_none() && !notif_on {
             return;
         }
         let active_windows: IndexSet<WindowId> = windows
@@ -600,17 +672,9 @@ impl State {
                 continue;
             }
             let s = &sessions[i];
+            // The one message this event carries, however it is delivered.
+            let text = notification_text(&window_name(windows, &s.window), &s.label);
             if let Some(mode) = notify_mode {
-                let win_name = windows
-                    .iter()
-                    .find(|w| w.id == s.window)
-                    .map(|w| w.name.clone())
-                    .unwrap_or_default();
-                let text = if s.label.is_empty() {
-                    win_name
-                } else {
-                    format!("{win_name} · {}", s.label)
-                };
                 let escape = osc_escape(mode, &s.agent, &text);
                 for tty in env.client_ttys(&server.0, &s.pane.0) {
                     env.write_tty(&tty, &escape);
@@ -620,8 +684,102 @@ impl State {
                 let tty = env.pane_tty(&server.0, &s.pane.0);
                 env.write_tty(&tty, "\x07");
             }
+            if notif_on {
+                self.push_notification(server, s, text);
+            }
         }
     }
+
+    /// Record an attention event in this server's notification area: newest
+    /// first, one entry per session (a session that fires again moves back to the
+    /// top rather than filling the area with itself), and never more than
+    /// [`NOTIFICATION_LIMIT`].
+    fn push_notification(&mut self, server: &ServerKey, session: &Session, body: String) {
+        let Some(state) = self.servers.get_mut(server) else {
+            return;
+        };
+        state.notifications.retain(|n| n.session != session.id);
+        state.notifications.insert(
+            0,
+            Notification {
+                session: session.id.clone(),
+                pane: session.pane.clone(),
+                agent: session.agent.clone(),
+                body,
+                color: session.color,
+            },
+        );
+        state.notifications.truncate(NOTIFICATION_LIMIT);
+    }
+
+    /// Bring this server's notification area back in line with the sessions just
+    /// placed: an entry whose session is displayed nowhere is dropped, and a
+    /// surviving one re-reads the pane, message and color of the placement it
+    /// names so opening it lands where the agent is now and it reads as the
+    /// session reads now. Turning the area off empties it, so switching it back
+    /// on does not resurrect stale entries.
+    fn refresh_notifications(
+        &mut self,
+        server: &ServerKey,
+        windows: &[Window],
+        sessions: &[Session],
+        on: bool,
+    ) {
+        let Some(state) = self.servers.get_mut(server) else {
+            return;
+        };
+        if !on {
+            state.notifications.clear();
+            return;
+        }
+        state
+            .notifications
+            .retain_mut(|n| match sessions.iter().find(|s| s.id == n.session) {
+                Some(s) => {
+                    n.pane = s.pane.clone();
+                    n.agent = s.agent.clone();
+                    n.body = notification_text(&window_name(windows, &s.window), &s.label);
+                    n.color = s.color;
+                    true
+                }
+                None => false,
+            });
+    }
+
+    /// Drop the notification area's entries for every pane in `focused`: you are
+    /// looking at the agent, so its call has been answered. This is what clears
+    /// the `●` too, so the two go together, and an event raised by a pane you are
+    /// already sitting in never reaches the area at all.
+    fn clear_focused_notifications(&mut self, server: &ServerKey, focused: &IndexSet<PaneId>) {
+        if let Some(state) = self.servers.get_mut(server) {
+            state.notifications.retain(|n| !focused.contains(&n.pane));
+        }
+    }
+}
+
+/// The name of the window `id` names, empty when that window is gone.
+fn window_name(windows: &[Window], id: &WindowId) -> String {
+    windows
+        .iter()
+        .find(|w| &w.id == id)
+        .map(|w| w.name.clone())
+        .unwrap_or_default()
+}
+
+/// The notification area's entries as the client draws them: the row key it
+/// echoes back, and the label and color naming the agent that raised each.
+fn notification_nodes(notifications: &[Notification]) -> Vec<NotificationNode> {
+    notifications
+        .iter()
+        .map(|n| NotificationNode {
+            id: RowKey::Notification {
+                session: n.session.clone(),
+            },
+            title: n.agent.clone(),
+            body: n.body.clone(),
+            color: n.color,
+        })
+        .collect()
 }
 
 /// Mirror each session's turn state onto the pane it occupies, so the window-tree
@@ -799,21 +957,48 @@ mod tests {
         ("/s", windows, panes)
     }
 
-    /// Register a claude session occupying `%1` via its recorded pid descending
-    /// from the pane's process (pid 2), so it is placed there.
-    fn register_occupying(state: &mut State, event: HookAction, token: i128) -> Vec<ServerKey> {
+    /// Register claude session `session_id` occupying `%1` via its recorded pid
+    /// descending from the pane's process (pid 2), so it is placed there. A pane
+    /// can host several, which is how a test raises events for more than one.
+    fn register_session(
+        state: &mut State,
+        session_id: &str,
+        event: HookAction,
+        token: i128,
+    ) -> Vec<ServerKey> {
         let self_pid = std::process::id();
         state.on_hook(
             Some(ServerKey("/s".into())),
             Some(PaneId("%1".into())),
             "claude".into(),
             event,
-            "abc".into(),
+            session_id.into(),
             "/home/x".into(),
             String::new(),
             Some(self_pid),
             token,
         )
+    }
+
+    fn register_occupying(state: &mut State, event: HookAction, token: i128) -> Vec<ServerKey> {
+        register_session(state, "abc", event, token)
+    }
+
+    /// Run one poll of the sample server, discarding the pushes.
+    fn poll(state: &mut State, env: &FakeTmux) {
+        let parents = env.ppid_map();
+        let mut pushes = Vec::new();
+        state.poll_server(env, &ServerKey("/s".into()), &parents, &mut pushes);
+    }
+
+    /// The session keys held in the sample server's notification area, in the
+    /// order they are drawn.
+    fn notified(state: &State) -> Vec<crate::model::SessionKey> {
+        state.servers[&ServerKey("/s".into())]
+            .notifications
+            .iter()
+            .map(|n| n.session.clone())
+            .collect()
     }
 
     fn hello_client(state: &mut State, env: &FakeTmux, conn: u64) -> Vec<(ConnId, ServerMsg)> {
@@ -974,6 +1159,169 @@ mod tests {
             .filter(|(_, d)| d == "\x07")
             .count();
         assert_eq!(bell_count, 1);
+    }
+
+    #[test]
+    fn an_attention_event_reaches_the_notification_area() {
+        // No bell and no osc-notify option: the area is driven by the event
+        // itself, not by the desktop notification being switched on. The agent's
+        // pane is not the focused one, or the event would be answered on
+        // arrival.
+        let env = env_for(false);
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+        register_occupying(&mut state, HookAction::NeedsAttention, 100);
+        poll(&mut state, &env);
+
+        assert_eq!(notified(&state), vec![key("claude-abc")]);
+        let model = state.clients[&ConnId(0)].last_pushed.clone().unwrap();
+        assert_eq!(
+            model.notifications[0].id,
+            RowKey::Notification {
+                session: key("claude-abc")
+            }
+        );
+        // The agent titles the entry and the window and label describe it, which
+        // is what the desktop notification would have said.
+        assert_eq!(model.notifications[0].title, "claude");
+        assert_eq!(model.notifications[0].body, "main · x");
+    }
+
+    #[test]
+    fn the_area_holds_the_three_newest_events_newest_first() {
+        let env = env_for(false);
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+        for (i, session) in ["a", "b", "c", "d"].iter().enumerate() {
+            register_session(&mut state, session, HookAction::NeedsAttention, i as i128);
+            poll(&mut state, &env);
+        }
+        assert_eq!(
+            notified(&state),
+            vec![key("claude-d"), key("claude-c"), key("claude-b")],
+            "the oldest event is pushed out"
+        );
+    }
+
+    #[test]
+    fn a_session_that_fires_again_moves_up_instead_of_repeating() {
+        let env = env_for(false);
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+        register_session(&mut state, "a", HookAction::NeedsAttention, 1);
+        poll(&mut state, &env);
+        register_session(&mut state, "b", HookAction::NeedsAttention, 2);
+        poll(&mut state, &env);
+        register_session(&mut state, "a", HookAction::NeedsAttention, 3);
+        poll(&mut state, &env);
+
+        assert_eq!(notified(&state), vec![key("claude-a"), key("claude-b")]);
+    }
+
+    #[test]
+    fn opening_a_notification_focuses_its_pane_and_dismisses_the_area() {
+        let env = env_for(false);
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+        register_occupying(&mut state, HookAction::NeedsAttention, 100);
+        poll(&mut state, &env);
+
+        state.on_input(
+            &env,
+            ConnId(0),
+            InputEvent::Activate {
+                key: RowKey::Notification {
+                    session: key("claude-abc"),
+                },
+            },
+        );
+        assert_eq!(
+            *env.focuses.borrow(),
+            vec![("@1".to_string(), Some("%1".to_string()))]
+        );
+        assert!(notified(&state).is_empty(), "the whole area is dismissed");
+        // The selection named a row that is gone, so it falls back into the tree.
+        assert_eq!(
+            state.servers[&ServerKey("/s".into())].selection,
+            Some(RowKey::Window {
+                window: WindowId("@1".into())
+            })
+        );
+    }
+
+    #[test]
+    fn an_entry_stays_while_its_pane_is_unfocused() {
+        // Nothing but opening it or a newer event displaces an entry: polls on
+        // their own leave it alone.
+        let env = env_for(false);
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+        register_occupying(&mut state, HookAction::NeedsAttention, 100);
+        poll(&mut state, &env);
+        poll(&mut state, &env);
+
+        assert_eq!(notified(&state), vec![key("claude-abc")]);
+    }
+
+    #[test]
+    fn focusing_a_pane_clears_its_entries() {
+        let unfocused = env_for(false);
+        let mut state = State::new();
+        hello_client(&mut state, &unfocused, 0);
+        register_occupying(&mut state, HookAction::NeedsAttention, 100);
+        poll(&mut state, &unfocused);
+        assert_eq!(notified(&state), vec![key("claude-abc")]);
+
+        // The same server with %1 now the focused pane: you are looking at the
+        // agent, so its call is answered — the `●` and the entry go together.
+        let focused = env_for(true);
+        poll(&mut state, &focused);
+        assert_eq!(state.registry[&key("claude-abc")].attention_token, None);
+        assert!(notified(&state).is_empty());
+    }
+
+    #[test]
+    fn an_event_from_the_pane_you_are_in_never_reaches_the_area() {
+        let env = env_for(true);
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+        register_occupying(&mut state, HookAction::NeedsAttention, 100);
+        poll(&mut state, &env);
+
+        assert!(
+            notified(&state).is_empty(),
+            "there is nothing to tell you about the pane you are sitting in"
+        );
+    }
+
+    #[test]
+    fn a_notification_whose_session_is_gone_is_dropped() {
+        let env = env_for(false);
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+        register_occupying(&mut state, HookAction::NeedsAttention, 100);
+        poll(&mut state, &env);
+        assert_eq!(notified(&state), vec![key("claude-abc")]);
+
+        register_occupying(&mut state, HookAction::End, 0);
+        poll(&mut state, &env);
+        assert!(
+            notified(&state).is_empty(),
+            "an entry that could no longer be opened is not kept"
+        );
+    }
+
+    #[test]
+    fn the_area_is_empty_while_the_option_is_off() {
+        let env = env_for(false).with_option("/s", "@wrangler-notifications", "off");
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+        register_occupying(&mut state, HookAction::NeedsAttention, 100);
+        poll(&mut state, &env);
+
+        assert!(notified(&state).is_empty());
+        let model = state.clients[&ConnId(0)].last_pushed.clone().unwrap();
+        assert!(model.notifications.is_empty());
     }
 
     #[test]

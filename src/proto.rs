@@ -173,8 +173,8 @@ pub fn read_message<R: BufRead, M: DeserializeOwned>(r: &mut R) -> io::Result<Op
 mod tests {
     use super::*;
     use crate::model::{
-        Child, Indicator, NamedColor, ProgressState, RowKey, RowTree, Section, SessionKey,
-        WindowNode,
+        Child, Indicator, NamedColor, NotificationNode, ProgressState, RowKey, RowTree, Section,
+        SessionKey, WindowNode,
     };
     use std::io::{BufReader, Cursor};
 
@@ -241,6 +241,14 @@ mod tests {
                     }],
                 }],
             },
+            notifications: vec![NotificationNode {
+                id: RowKey::Notification {
+                    session: SessionKey("claude-abc".into()),
+                },
+                title: "claude".into(),
+                body: "main · repo".into(),
+                color: Some(NamedColor::Purple),
+            }],
             selection: Some(RowKey::Pane {
                 pane: PaneId("%5".into()),
             }),

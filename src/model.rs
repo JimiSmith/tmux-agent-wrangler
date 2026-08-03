@@ -155,10 +155,26 @@ pub struct Session {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RowKey {
-    Window { window: WindowId },
-    AgentWindow { agent: String, window: WindowId },
-    Pane { pane: PaneId },
-    Agent { session: SessionKey, pane: PaneId },
+    Window {
+        window: WindowId,
+    },
+    AgentWindow {
+        agent: String,
+        window: WindowId,
+    },
+    Pane {
+        pane: PaneId,
+    },
+    Agent {
+        session: SessionKey,
+        pane: PaneId,
+    },
+    /// A notification-area entry. It names the session alone: the daemon holds
+    /// one entry per session and refreshes the pane it points at every poll, so
+    /// a session that has moved still opens where it now lives.
+    Notification {
+        session: SessionKey,
+    },
 }
 
 /// The sidebar's whole content, as structure: blocks of windows, each with its
@@ -221,6 +237,21 @@ pub enum Child {
     },
 }
 
+/// One entry of the notification area: an attention event, captured when it
+/// fired and held until it is opened or pushed out by a newer one. It is drawn
+/// as its `title` over its `body`, which the client wraps to the pane width.
+///
+/// Its `id` is a [`RowKey::Notification`] rather than the key of the agent row
+/// naming the same session, so opening the entry is distinguishable from
+/// selecting that agent in the tree — only the former clears the area.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NotificationNode {
+    pub id: RowKey,
+    pub title: String,
+    pub body: String,
+    pub color: Option<NamedColor>,
+}
+
 /// A child's position among its siblings, which is what decides the branch glyph
 /// the client draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -264,6 +295,16 @@ pub enum RowContent {
         branch: Branch,
         here: bool,
         color: Option<NamedColor>,
+    },
+    /// The first line of a notification-area entry: the agent that raised it. It
+    /// sits under no window, so it carries neither a branch nor an index.
+    NotificationTitle {
+        title: String,
+        color: Option<NamedColor>,
+    },
+    /// One line of an entry's description, already wrapped to the pane width.
+    NotificationBody {
+        text: String,
     },
 }
 
@@ -370,6 +411,17 @@ impl Child {
     }
 }
 
+/// The notification area's selectable ids, in display order.
+///
+/// The area is painted as its own region rather than appended to the tree, but
+/// its entries are selectable like any other row. Both ends read this — the
+/// daemon to resolve the selection, the client to navigate — so the area's nav
+/// order cannot drift from the order it is drawn in. An entry is one selectable
+/// thing however many lines its description wraps to.
+pub fn notification_ids(nodes: &[NotificationNode]) -> Vec<RowKey> {
+    nodes.iter().map(|n| n.id.clone()).collect()
+}
+
 /// A row that is neither selectable nor indicated: the headings and blanks.
 fn plain(content: RowContent) -> Row {
     Row {
@@ -380,11 +432,13 @@ fn plain(content: RowContent) -> Row {
 }
 
 /// The per-window render payload the daemon pushes to a client: the tree to
-/// draw, the shared selection, and whether this sidebar currently has focus
-/// (the active pane of the active window) so only it shows the selection bar.
+/// draw, the notification area beneath it, the shared selection, and whether
+/// this sidebar currently has focus (the active pane of the active window) so
+/// only it shows the selection bar.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RowModel {
     pub tree: RowTree,
+    pub notifications: Vec<NotificationNode>,
     pub selection: Option<RowKey>,
     pub has_focus: bool,
 }
@@ -428,6 +482,21 @@ mod tests {
             .filter_map(|r| match &r.content {
                 RowContent::Pane { branch, .. } | RowContent::Agent { branch, .. } => Some(*branch),
                 _ => None,
+            })
+            .collect()
+    }
+
+    /// The kind of each row in order, which is what a layout assertion is about.
+    fn shape(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .map(|r| match &r.content {
+                RowContent::Header { text } => format!("header:{text}"),
+                RowContent::Blank => "blank".to_string(),
+                RowContent::Window { .. } => "window".to_string(),
+                RowContent::Pane { .. } => "pane".to_string(),
+                RowContent::Agent { .. } => "agent".to_string(),
+                RowContent::NotificationTitle { title, .. } => format!("title:{title}"),
+                RowContent::NotificationBody { text } => format!("body:{text}"),
             })
             .collect()
     }
@@ -511,16 +580,7 @@ mod tests {
             ],
         };
         let rows = tree.flatten();
-        let shape: Vec<String> = rows
-            .iter()
-            .map(|r| match &r.content {
-                RowContent::Header { text } => format!("header:{text}"),
-                RowContent::Blank => "blank".to_string(),
-                RowContent::Window { .. } => "window".to_string(),
-                RowContent::Pane { .. } => "pane".to_string(),
-                RowContent::Agent { .. } => "agent".to_string(),
-            })
-            .collect();
+        let shape = shape(&rows);
         // No blank opens the sidebar, and one separates the two blocks.
         assert_eq!(
             shape,
@@ -556,6 +616,37 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    fn notification(session: &str) -> NotificationNode {
+        NotificationNode {
+            id: RowKey::Notification {
+                session: SessionKey(session.to_string()),
+            },
+            title: "claude".to_string(),
+            body: "win · label".to_string(),
+            color: None,
+        }
+    }
+
+    #[test]
+    fn an_empty_notification_area_has_nothing_to_select() {
+        assert!(notification_ids(&[]).is_empty());
+    }
+
+    #[test]
+    fn each_notification_is_one_selectable_thing_in_order() {
+        assert_eq!(
+            notification_ids(&[notification("claude-a"), notification("claude-b")]),
+            vec![
+                RowKey::Notification {
+                    session: SessionKey("claude-a".to_string())
+                },
+                RowKey::Notification {
+                    session: SessionKey("claude-b".to_string())
+                },
+            ]
+        );
     }
 
     #[test]

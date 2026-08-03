@@ -55,6 +55,20 @@ pub enum OscNotify {
     Osc9,
 }
 
+/// The message an attention event carries: the window the agent is in and the
+/// label the sidebar knows it by, or the window alone when it has no label yet.
+///
+/// One rule for the wording, because the same two strings are both the body of
+/// the escape [`osc_escape`] builds and the description the notification area
+/// shows: an event says the same thing wherever it is read. Pure.
+pub fn notification_text(window_name: &str, label: &str) -> String {
+    if label.is_empty() {
+        window_name.to_string()
+    } else {
+        format!("{window_name} · {label}")
+    }
+}
+
 /// Build the desktop-notification escape for `mode`. `Osc777` embeds `agent` as
 /// the notification title and then `text` as the body; `Osc9` carries `text`
 /// alone and ignores `agent`. Both terminate with BEL (`\x07`). Pure.
@@ -167,6 +181,16 @@ mod tests {
         n.retain_live(&live);
         // Forgotten, so the same token fires again as a first event.
         assert!(n.should_fire(&key("claude-a"), 100));
+    }
+
+    #[test]
+    fn notification_text_joins_the_window_and_label() {
+        assert_eq!(notification_text("win", "label"), "win · label");
+    }
+
+    #[test]
+    fn notification_text_of_an_unlabelled_session_is_the_window_alone() {
+        assert_eq!(notification_text("win", ""), "win");
     }
 
     #[test]

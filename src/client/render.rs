@@ -46,6 +46,17 @@ fn branch(branch: Branch) -> char {
 const ICON_PANE: char = '\u{f489}';
 const ICON_AGENT: char = '\u{f167a}';
 
+/// A description line hangs beneath its title, indented to the column the
+/// title's text starts in (past the gutter, the icon and their space).
+const BODY_INDENT: &str = "   ";
+
+/// The columns a description line has for its text in a pane `width` columns
+/// wide: the indent comes off the front and the reserved right-hand column off
+/// the end. Never zero, so wrapping to it always terminates.
+pub fn notification_body_field(width: usize) -> usize {
+    width.saturating_sub(BODY_INDENT.len() + 1).max(1)
+}
+
 /// A row's text, split so a color can land on the kind icon alone.
 enum Parts {
     /// One undivided line: a heading, a blank, or a window row, which has no
@@ -105,6 +116,15 @@ fn parts(content: &RowContent) -> Parts {
             here,
             color,
         } => child_parts(*here, ICON_AGENT, *branch, index, label, *color),
+        // No gutter and no branch: the entry hangs off nothing, and the area it
+        // sits in is never where you are.
+        RowContent::NotificationTitle { title, color } => Parts::Split {
+            head: " ".to_string(),
+            icon: ICON_AGENT,
+            tail: format!(" {title}"),
+            color: *color,
+        },
+        RowContent::NotificationBody { text } => Parts::Whole(format!("{BODY_INDENT}{text}")),
     }
 }
 
@@ -194,6 +214,10 @@ pub fn base_style(content: &RowContent, colors: &Colors) -> Style {
         RowContent::Blank => Style::new().dim(),
         RowContent::Window { active, color, .. } => own_color(weight(*active), colors, *color),
         RowContent::Pane { here, .. } | RowContent::Agent { here, .. } => weight(*here),
+        RowContent::NotificationTitle { .. } => Style::new(),
+        // Dimmed, so the title leads and the description reads as its detail.
+        // Weight is not available for that: it says where you are.
+        RowContent::NotificationBody { .. } => Style::new().dim(),
     }
 }
 
@@ -294,6 +318,60 @@ mod tests {
             pane_row.replace(ICON_PANE, ""),
             agent_row.replace(ICON_AGENT, "")
         );
+    }
+
+    #[test]
+    fn a_notification_title_is_an_agent_row_without_the_tree() {
+        // It hangs off no window, so it keeps the agent's icon column but drops
+        // the gutter, the branch and the index.
+        assert_eq!(
+            row_text(&RowContent::NotificationTitle {
+                title: "claude".to_string(),
+                color: None,
+            }),
+            " \u{f167a} claude"
+        );
+    }
+
+    #[test]
+    fn a_description_line_starts_under_its_titles_text() {
+        let title = row_text(&RowContent::NotificationTitle {
+            title: "claude".to_string(),
+            color: None,
+        });
+        let body = row_text(&RowContent::NotificationBody {
+            text: "vim · api".to_string(),
+        });
+        assert_eq!(body, "   vim · api");
+        // Columns, not byte offsets: the icon is one column and several bytes.
+        let column = |line: &str, text: &str| line.chars().count() - text.chars().count();
+        assert_eq!(
+            column(&title, "claude"),
+            column(&body, "vim · api"),
+            "the description hangs under the title's text"
+        );
+    }
+
+    #[test]
+    fn a_notifications_color_lands_on_its_icon_and_nowhere_else() {
+        let colors = Colors::new();
+        let content = RowContent::NotificationTitle {
+            title: "a".to_string(),
+            color: Some(NamedColor::Cyan),
+        };
+        let segments = row_segments(&content, &colors);
+        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, vec![" ", "\u{f167a}", " a"]);
+        assert!(segments[1].style.fg.is_some(), "the icon carries the color");
+        assert!(segments[2].style.fg.is_none(), "the title stays default");
+    }
+
+    #[test]
+    fn the_description_field_leaves_room_for_the_indent_and_the_edge() {
+        // 24 columns: three of indent and one reserved at the right edge.
+        assert_eq!(notification_body_field(24), 20);
+        // Absurdly narrow panes still yield a field to wrap into.
+        assert_eq!(notification_body_field(2), 1);
     }
 
     #[test]

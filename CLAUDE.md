@@ -159,7 +159,13 @@ runtime; the concurrency model is the same either way.
   `Branch`, and `here` (`window.active && child.active`, so the active pane of a
   window you are not in does not qualify). Both ends run it — the daemon to
   resolve the selection, the client to paint — so nav order and paint order are
-  the same order by construction.
+  the same order by construction. The notification area rides in the `RowModel`
+  beside the tree rather than inside it: it is a second region, pinned to the
+  foot of the pane and never scrolled, and an entry's *height* depends on the
+  width its description wraps to, so only the paint can flatten it. What both
+  ends share is `notification_ids` — one id per entry, however many lines it is
+  drawn on — so `resolve_selection` and the client's nav run tree-then-area end
+  to end in the same order.
 
 - **`client/render.rs`** — the only place a glyph is chosen. `parts` splits a row
   into the `▌` gutter, the kind icon (`` pane, `󱙺` agent, Nerd Font glyphs one
@@ -177,7 +183,21 @@ runtime; the concurrency model is the same either way.
   colored icon or indicator would paint a block of color across the selected
   row.
   Turn state is left entirely to the right-edge indicator, which inherits
-  `base_style` when it has no state color of its own.
+  `base_style` when it has no state color of its own. A notification entry is two
+  contents: a title row drawn as an agent row stripped of the tree (same icon
+  column carrying the same color, no gutter, branch or index, because it hangs
+  off no window) over dimmed description rows indented to the title's text —
+  dimmed and not lightened, because weight is the "where you are" channel and is
+  not available to say "detail".
+  `notification_lines` (`client/mod.rs`) builds those rows and so decides the
+  split between the two regions: it wraps each description to
+  `notification_body_field`, admits an entry only if it fits *whole* (never a
+  title over a cut-off message), caps the area at a quarter of the pane, and
+  yields nothing when that leaves no room for one entry beside the heading. Every
+  line of an entry carries the entry's id, so a click anywhere in it opens the
+  same thing. The paint records the rows it drew so a click resolves against the
+  frame it landed on, and pads a short tree out so the area stays at the foot of
+  the pane.
 
 - **`notify.rs`** — the bell (`@wrangler-bell`) and the desktop notification
   (`@wrangler-osc-notify`). Raised by the daemon off the poll, not by the hook,
@@ -186,6 +206,26 @@ runtime; the concurrency model is the same either way.
   notifier records the latest token per session, so an event signals exactly
   once. Pane focus does not gate either signal: it says nothing about whether
   the terminal is visible. The `●` still clears when the pane is focused.
+
+- **the notification area** (`@wrangler-notifications`, default on) — a third
+  sink on that same attention event, in `state.rs`: `signal_attention` fires the
+  bell, the escape and the area's entry off one `should_fire`, so the three can
+  never disagree about what fired, and the area fills whether or not the other
+  two are enabled. An entry carries the same two strings the escape does — the
+  agent as its title, `notification_text` as its message — so what popped up and
+  what is listed say the same thing. `ServerState` holds the entries (newest
+  first, one per session, `NOTIFICATION_LIMIT` of them) beside the selection, so
+  a server's sidebars show and dismiss one area. Every poll re-reads each entry's
+  pane and message from the placements and drops one that is displayed nowhere:
+  an entry is a live pointer, not a log line, and opening it lands where the
+  agent is now. Its key is a `RowKey::Notification` rather than the agent row's
+  key, which is what lets `activate` tell "opened the notification" (focus, then
+  clear the area) from "selected that agent" (focus alone). The cleared selection
+  then falls back through `resolve_selection` onto the window just jumped to.
+  A focused pane's entries are dropped in the same poll pass that acknowledges
+  its `●`, so the two clear together — which also means an event raised by the
+  pane you are already in is cleared in the poll that recorded it, and never
+  appears.
 
 - **`persist.rs`** — the registry snapshot, one file per session under
   `sessions/` in the state dir (`$XDG_STATE_HOME/tmux-agent-wrangler`, default
