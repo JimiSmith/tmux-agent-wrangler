@@ -242,8 +242,8 @@ pub enum Child {
 /// as its `title` over its `body`, which the client wraps to the pane width.
 ///
 /// Its `id` is a [`RowKey::Notification`] rather than the key of the agent row
-/// naming the same session, so opening the entry is distinguishable from
-/// selecting that agent in the tree — only the former clears the area.
+/// naming the same session, so acting on this entry and acting on that agent row
+/// are two distinguishable events rather than one.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NotificationNode {
     pub id: RowKey,

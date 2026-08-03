@@ -388,14 +388,14 @@ impl State {
                 self.activate(env, &server, &key);
                 if let Some(s) = self.servers.get_mut(&server) {
                     s.selection = Some(key.clone());
-                    // Opening one notification dismisses the area: it has served
-                    // its purpose, and leaving the rest behind would keep a row
-                    // that is no longer news. The selection then names a row that
-                    // is gone, so the repoll below falls it back into the tree —
-                    // onto the window just jumped to.
-                    if matches!(key, RowKey::Notification { .. }) {
-                        s.notifications.clear();
-                    }
+                }
+                // Opening one notification dismisses it and the entries sharing
+                // its pane, because the jump answers all of them at once; the
+                // rest are calls from elsewhere and stay. The selection then
+                // names a row that is gone, so the repoll below falls it back
+                // into the tree — onto the window just jumped to.
+                if let RowKey::Notification { session } = &key {
+                    self.dismiss_notification(&server, session);
                 }
                 let parents = env.ppid_map();
                 self.poll_server(env, &server, &parents, &mut pushes);
@@ -749,6 +749,25 @@ impl State {
                 }
                 None => false,
             });
+    }
+
+    /// Drop the notification area's entry for `session` and every entry naming
+    /// the same pane: opening one focuses that pane, which answers every call
+    /// coming from it just as focusing the pane by any other route would. An
+    /// entry for another pane is a call you have not been to yet, so it stays.
+    fn dismiss_notification(&mut self, server: &ServerKey, session: &SessionKey) {
+        let Some(state) = self.servers.get_mut(server) else {
+            return;
+        };
+        let Some(pane) = state
+            .notifications
+            .iter()
+            .find(|n| &n.session == session)
+            .map(|n| n.pane.clone())
+        else {
+            return;
+        };
+        state.notifications.retain(|n| n.pane != pane);
     }
 
     /// Drop the notification area's entries for every pane in `focused`: you are
@@ -1227,12 +1246,15 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_notification_focuses_its_pane_and_dismisses_the_area() {
+    fn opening_a_notification_focuses_its_pane_and_clears_that_pane() {
+        // Both sessions are in %1, so jumping there answers both calls.
         let env = env_for(false);
         let mut state = State::new();
         hello_client(&mut state, &env, 0);
         register_occupying(&mut state, HookAction::NeedsAttention, 100);
+        register_session(&mut state, "sib", HookAction::NeedsAttention, 101);
         poll(&mut state, &env);
+        assert_eq!(notified(&state).len(), 2);
 
         state.on_input(
             &env,
@@ -1247,7 +1269,10 @@ mod tests {
             *env.focuses.borrow(),
             vec![("@1".to_string(), Some("%1".to_string()))]
         );
-        assert!(notified(&state).is_empty(), "the whole area is dismissed");
+        assert!(
+            notified(&state).is_empty(),
+            "both entries name the pane just jumped to"
+        );
         // The selection named a row that is gone, so it falls back into the tree.
         assert_eq!(
             state.servers[&ServerKey("/s".into())].selection,
@@ -1255,6 +1280,58 @@ mod tests {
                 window: WindowId("@1".into())
             })
         );
+    }
+
+    #[test]
+    fn opening_a_notification_leaves_the_entries_for_other_panes() {
+        // Two unfocused panes, each with an agent calling: opening one answers
+        // that pane only, and the other pane's call is still waiting.
+        let panes = [
+            "@1\t%1\t0\t0\t\t\t\t2\t/home/x\tMySession",
+            "@1\t%2\t1\t0\t\t\t\t3\t/home/y\tOther",
+        ]
+        .join("\n");
+        // The second agent needs a pid that is really running, or it is pruned as
+        // dead before it can be placed; the fake ps map hangs it off %2's pane
+        // process so it occupies that pane.
+        let mut agent = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let env = FakeTmux::default()
+            .with_windows("/s", "@1\t0\tmain\t1", &panes)
+            .with_parent(std::process::id(), 2)
+            .with_parent(agent.id(), 3);
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+        register_occupying(&mut state, HookAction::NeedsAttention, 100);
+        state.on_hook(
+            Some(ServerKey("/s".into())),
+            Some(PaneId("%2".into())),
+            "claude".into(),
+            HookAction::NeedsAttention,
+            "def".into(),
+            "/home/y".into(),
+            String::new(),
+            Some(agent.id()),
+            101,
+        );
+        poll(&mut state, &env);
+        assert_eq!(notified(&state), vec![key("claude-def"), key("claude-abc")]);
+
+        state.on_input(
+            &env,
+            ConnId(0),
+            InputEvent::Activate {
+                key: RowKey::Notification {
+                    session: key("claude-abc"),
+                },
+            },
+        );
+        assert_eq!(notified(&state), vec![key("claude-def")]);
+
+        agent.kill().expect("kill sleep");
+        agent.wait().expect("reap sleep");
     }
 
     #[test]

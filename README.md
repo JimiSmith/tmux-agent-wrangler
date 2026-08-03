@@ -363,9 +363,10 @@ oldest entries that give way.
 Its entries are rows like any other: `j`/`k` walks off the bottom of the tree
 into them and `Enter` opens one, as does a click anywhere on it. Opening an entry
 jumps to the pane the agent is in *now* (a session that has moved since it called
-still lands right) and dismisses the whole area, on every sidebar of that server.
-An entry also clears when you focus the pane it points at, alongside that pane's
-`●`: you are looking at the agent, so its call has been answered. An event raised
+still lands right) and dismisses that entry along with any other pointing at the
+same pane, on every sidebar of that server. Calls from other panes stay. An entry
+also clears when you focus the pane it points at, alongside that pane's `●`: you
+are looking at the agent, so its call has been answered. An event raised
 by the pane you are already sitting in never reaches the area at all. Otherwise
 an entry stays until a newer one pushes it out.
 

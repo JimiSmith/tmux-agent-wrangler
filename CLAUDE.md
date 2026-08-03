@@ -229,7 +229,9 @@ runtime; the concurrency model is the same either way.
   an entry is a live pointer, not a log line, and opening it lands where the
   agent is now. Its key is a `RowKey::Notification` rather than the agent row's
   key, which is what lets `activate` tell "opened the notification" (focus, then
-  clear the area) from "selected that agent" (focus alone). The cleared selection
+  drop every entry naming the pane just jumped to, the opened one included) from
+  "selected that agent" (focus alone). Entries for other panes survive: the jump
+  answers only the calls coming from where it landed. The dismissed selection
   then falls back through `resolve_selection` onto the window just jumped to.
   A focused pane's entries are dropped in the same poll pass that acknowledges
   its `●`, so the two clear together — which also means an event raised by the
