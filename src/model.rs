@@ -15,7 +15,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServerKey(pub String);
 
+/// A tmux session id, e.g. `"$1"`. Scoped to one server, and stable across a
+/// rename in a way the session's name is not, so this is the id to key on.
+///
+/// Distinct from [`SessionKey`], which is an *agent* session: the two are
+/// unrelated namespaces that both call themselves a session.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TmuxSessionId(pub String);
+
 /// A tmux window id, e.g. `"@3"`. Scoped to one server.
+///
+/// A window belongs to the server, not to one session: `link-window` and session
+/// groups both put one window in several sessions at once, so a window id does
+/// not imply a session.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub String);
 

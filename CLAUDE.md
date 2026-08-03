@@ -289,8 +289,18 @@ client with the others following.
 
 ### Sidebar lifecycle
 
-`toggle` spawns one sidebar per window and kills every sidebar pane on the
-server; between those two, a window created while the sidebar is on gets its
+`toggle` acts on the current session's **component**: the windows of that
+session, of every session sharing one of those windows, and so on
+(`component_windows`). Whether a window holds a sidebar is a fact about the
+window, and `link-window` and session groups both put one window in several
+sessions, so a narrower scope leaves a session holding sidebars in some of its
+windows and not others — killing the sidebar in a shared window without killing
+that session's others. With nothing shared, every session is its own component
+and this is exactly that session's windows. It cannot give two sessions
+different answers about a window they share: one window holds one sidebar pane,
+so a component is all on or all off.
+
+Between the two, a window created while the sidebar is on gets its
 sidebar from the daemon's control-mode listener, however that window came into
 being (tmux reports `break-pane` and a new session's first window as the same
 window-add). Whether it gets one is asked of the window's own *session*: the

@@ -52,7 +52,8 @@ run-shell /path/to/tmux-agent-wrangler/wrangler.tmux
 
 ## Usage
 
-- `prefix + Tab` — toggle the sidebar
+- `prefix + Tab` — toggle the sidebar for this session (and for any session
+  sharing a window with it, since one window holds one sidebar pane)
 - `prefix + a` — focus this window's sidebar (no-op if the sidebar is off)
 - `Up`/`Down` or `k`/`j` — move the highlight between rows, the notification
   area included

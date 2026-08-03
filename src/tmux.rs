@@ -11,7 +11,7 @@ use std::process::Command;
 use indexmap::{IndexMap, IndexSet};
 
 use crate::daemon::assoc::strip_status_prefix;
-use crate::model::{Pane, PaneId, Window, WindowId};
+use crate::model::{Pane, PaneId, TmuxSessionId, Window, WindowId};
 
 /// The `list-windows` format: `window_id`, `window_index`, `window_name`,
 /// `window_active`, tab-separated.
@@ -22,6 +22,14 @@ const WINDOW_FORMAT: &str = "#{window_id}\t#{window_index}\t#{window_name}\t#{wi
 /// and the free-form `pane_title`, which is kept last so a space or glyph in it
 /// cannot shift another field.
 const PANE_FORMAT: &str = "#{window_id}\t#{pane_id}\t#{pane_index}\t#{pane_active}\t#{@wrangler_sidebar}\t#{pane_pb_state}\t#{pane_pb_progress}\t#{pane_pid}\t#{pane_current_path}\t#{pane_title}";
+
+/// The server-wide `list-windows -a` format: one line per *(session, window)*
+/// pair, which is the relation the toggle's component scope is computed over.
+const SESSION_WINDOW_FORMAT: &str = "#{session_id}\t#{window_id}";
+
+/// The server-wide `list-panes -a` format for locating sidebar panes: the
+/// window a pane is in, the pane, and its sidebar flag.
+const SIDEBAR_SCAN_FORMAT: &str = "#{window_id}\t#{pane_id}\t#{@wrangler_sidebar}";
 
 /// The whole window/pane model read from a server in one pass: the ordered
 /// window tree plus the per-pane lookup maps other layers need to place agent
@@ -349,35 +357,125 @@ pub fn spawn(socket: &str, window: &str) {
     );
 }
 
-/// The sidebar on/off switch for one server. If any sidebar pane exists, kill
-/// every one of them (errors swallowed, since a pane may die mid-loop) and stop.
-/// Otherwise turn on: spawn one sidebar per window (each spawn is a no-op if that
-/// window already has one).
-pub fn toggle(socket: &str) {
-    let listing = run_tmux(
-        socket,
-        &["list-panes", "-s", "-F", "#{pane_id} #{@wrangler_sidebar}"],
-    );
-    let sidebars: Vec<String> = listing
-        .lines()
-        .filter_map(|l| {
-            let mut fields = l.split_whitespace();
-            let id = fields.next()?;
-            let flag = fields.next().unwrap_or("");
-            (flag == "1").then(|| id.to_string())
+/// Parse the *(session, window)* pairs from `list-windows -a`. Pure. A line
+/// missing either field is skipped.
+pub fn parse_session_windows(out: &str) -> Vec<(TmuxSessionId, WindowId)> {
+    out.lines()
+        .filter_map(|line| {
+            let (session, window) = line.split_once('\t')?;
+            let window = window.split('\t').next().unwrap_or(window);
+            (!session.is_empty() && !window.is_empty()).then(|| {
+                (
+                    TmuxSessionId(session.to_string()),
+                    WindowId(window.to_string()),
+                )
+            })
         })
-        .collect();
+        .collect()
+}
 
+/// Every window reachable from `session` by following shared windows: the
+/// windows of `session`, of every session sharing one of those, and so on.
+///
+/// This is the connected component of `session` in the bipartite
+/// session/window graph, and it is the unit the sidebar toggles over. Whether a
+/// window holds a sidebar pane is a fact about the *window*, and `link-window`
+/// and session groups both put one window in several sessions, so a scope
+/// narrower than the component can leave a session holding sidebars in some of
+/// its windows and not others. With nothing shared, every session is its own
+/// component and this is exactly that session's windows.
+///
+/// Pure, and deterministic in the relation's order.
+pub fn component_windows(
+    relation: &[(TmuxSessionId, WindowId)],
+    session: &TmuxSessionId,
+) -> IndexSet<WindowId> {
+    let mut by_session: IndexMap<&TmuxSessionId, Vec<&WindowId>> = IndexMap::new();
+    let mut by_window: IndexMap<&WindowId, Vec<&TmuxSessionId>> = IndexMap::new();
+    for (s, w) in relation {
+        by_session.entry(s).or_default().push(w);
+        by_window.entry(w).or_default().push(s);
+    }
+
+    let mut windows: IndexSet<WindowId> = IndexSet::new();
+    let mut seen: IndexSet<&TmuxSessionId> = IndexSet::new();
+    seen.insert(session);
+    let mut frontier: Vec<&TmuxSessionId> = vec![session];
+
+    while let Some(s) = frontier.pop() {
+        for window in by_session.get(s).into_iter().flatten() {
+            // A window already collected has had its sessions walked already.
+            if !windows.insert((*window).clone()) {
+                continue;
+            }
+            for sharer in by_window.get(*window).into_iter().flatten() {
+                if seen.insert(sharer) {
+                    frontier.push(sharer);
+                }
+            }
+        }
+    }
+    windows
+}
+
+/// The sidebar panes of `windows`, from `list-panes -a` output. Pure.
+///
+/// `list-panes -a` emits a pane once per session holding its window, so a pane
+/// in a shared window appears more than once; collecting into a set is what
+/// makes each one killed exactly once.
+pub fn parse_sidebars_in(out: &str, windows: &IndexSet<WindowId>) -> IndexSet<PaneId> {
+    out.lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let window = WindowId(fields.next()?.to_string());
+            let pane = fields.next()?;
+            let flag = fields.next().unwrap_or("");
+            (flag == "1" && windows.contains(&window)).then(|| PaneId(pane.to_string()))
+        })
+        .collect()
+}
+
+/// The sidebar on/off switch, over the current session's component
+/// ([`component_windows`]). If any of those windows holds a sidebar pane, kill
+/// every sidebar in the component (errors swallowed, since a pane may die
+/// mid-loop) and stop. Otherwise spawn one per window (each spawn is a no-op if
+/// that window already has one).
+///
+/// The current session is whichever tmux resolves an untargeted command to,
+/// which is the most recently used one and so the session of the client that
+/// pressed the key.
+pub fn toggle(socket: &str) {
+    let session = TmuxSessionId(
+        run_tmux(socket, &["display-message", "-p", "#{session_id}"])
+            .trim()
+            .to_string(),
+    );
+    if session.0.is_empty() {
+        return;
+    }
+
+    let relation = parse_session_windows(&run_tmux(
+        socket,
+        &["list-windows", "-a", "-F", SESSION_WINDOW_FORMAT],
+    ));
+    let windows = component_windows(&relation, &session);
+    if windows.is_empty() {
+        return;
+    }
+
+    let sidebars = parse_sidebars_in(
+        &run_tmux(socket, &["list-panes", "-a", "-F", SIDEBAR_SCAN_FORMAT]),
+        &windows,
+    );
     if !sidebars.is_empty() {
         for pane in &sidebars {
-            let _ = run_tmux(socket, &["kill-pane", "-t", pane]);
+            let _ = run_tmux(socket, &["kill-pane", "-t", &pane.0]);
         }
         return;
     }
 
-    let windows = run_tmux(socket, &["list-windows", "-F", "#{window_id}"]);
-    for win in windows.lines() {
-        spawn(socket, win.trim());
+    for window in &windows {
+        spawn(socket, &window.0);
     }
 }
 
@@ -555,6 +653,91 @@ mod tests {
         assert_eq!(r.windows[0].name, "good");
         assert!(r.windows[0].active);
         assert!(r.windows[0].panes.is_empty());
+    }
+
+    /// A server holding every sharing arrangement at once, as `list-windows -a`
+    /// reports it: `$0`/`$1` joined by the linked window `@2`, `$2`/`$3` a
+    /// session group sharing `@3`, and the two groups unrelated.
+    const MIXED: &str = "$0\t@0\n$0\t@2\n$1\t@1\n$1\t@2\n$2\t@3\n$3\t@3";
+
+    fn windows(ids: &[&str]) -> IndexSet<WindowId> {
+        ids.iter().map(|i| WindowId(i.to_string())).collect()
+    }
+
+    #[test]
+    fn an_unshared_session_is_its_own_component() {
+        // Nothing shared: the component is exactly that session's windows, which
+        // is the pre-existing per-session behaviour.
+        let relation = parse_session_windows("$0\t@0\n$0\t@1\n$1\t@2");
+        assert_eq!(
+            component_windows(&relation, &TmuxSessionId("$0".into())),
+            windows(&["@0", "@1"])
+        );
+        assert_eq!(
+            component_windows(&relation, &TmuxSessionId("$1".into())),
+            windows(&["@2"])
+        );
+    }
+
+    #[test]
+    fn a_shared_window_joins_both_sessions_windows() {
+        let relation = parse_session_windows(MIXED);
+        // From either side of the link, the component is the same set: the
+        // linked window plus what each session holds alone.
+        let from_a = component_windows(&relation, &TmuxSessionId("$0".into()));
+        let from_b = component_windows(&relation, &TmuxSessionId("$1".into()));
+        assert_eq!(from_a, windows(&["@0", "@2", "@1"]));
+        assert_eq!(from_a, from_b);
+
+        // The session group is a component of its own, and the unrelated pair
+        // is not dragged in.
+        assert_eq!(
+            component_windows(&relation, &TmuxSessionId("$2".into())),
+            windows(&["@3"])
+        );
+        assert!(!from_a.contains(&WindowId("@3".into())));
+    }
+
+    #[test]
+    fn sharing_is_followed_transitively() {
+        // $0-$1 share @1, $1-$2 share @3: toggling from $0 must reach $2, or it
+        // would leave $2 holding sidebars in only some of its windows.
+        let relation = parse_session_windows("$0\t@0\n$0\t@1\n$1\t@1\n$1\t@3\n$2\t@3\n$2\t@4");
+        assert_eq!(
+            component_windows(&relation, &TmuxSessionId("$0".into())),
+            windows(&["@0", "@1", "@3", "@4"])
+        );
+    }
+
+    #[test]
+    fn an_unknown_session_has_no_windows() {
+        let relation = parse_session_windows(MIXED);
+        assert!(component_windows(&relation, &TmuxSessionId("$9".into())).is_empty());
+    }
+
+    #[test]
+    fn malformed_relation_lines_are_skipped() {
+        let relation = parse_session_windows("$0\t@0\nno-tab-here\n\n\t@1\n$2\t");
+        assert_eq!(
+            relation,
+            vec![(TmuxSessionId("$0".into()), WindowId("@0".into()))]
+        );
+    }
+
+    #[test]
+    fn sidebars_are_scoped_to_the_component_and_deduped() {
+        // A pane in a shared window is listed once per session holding it, so
+        // %2 appears twice and must be killed once. %5 is a sidebar outside the
+        // component, and %0 a real pane inside it.
+        let out = "@0\t%0\t\n@0\t%1\t1\n@2\t%2\t1\n@2\t%2\t1\n@9\t%5\t1";
+        let scope = windows(&["@0", "@2"]);
+        let found = parse_sidebars_in(out, &scope);
+        assert_eq!(
+            found,
+            [PaneId("%1".into()), PaneId("%2".into())]
+                .into_iter()
+                .collect::<IndexSet<_>>()
+        );
     }
 
     #[test]
