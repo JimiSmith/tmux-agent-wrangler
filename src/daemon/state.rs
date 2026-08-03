@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use indexmap::{IndexMap, IndexSet};
 
 use crate::daemon::assoc::{fetch_agent_sessions, RegistryRecord, RegistrySession};
+use crate::daemon::control::ControlEvent;
 use crate::daemon::notify::{
     acknowledge_focused_attention, notification_text, osc_escape, Notifier, OscNotify,
 };
@@ -34,8 +35,8 @@ pub struct ConnId(pub u64);
 
 /// The side-effecting operations the state logic needs, behind one trait so tests
 /// substitute a fake. Reads (`fetch_windows`, `ppid_map`, `option`, `pane_tty`,
-/// `client_ttys`) feed the poll; the actions (`focus`, `toggle`, `spawn`,
-/// `focus_key`) and `write_tty` are fire-and-forget effects.
+/// `client_ttys`) feed the poll; the actions (`focus`, `toggle`, `focus_key`,
+/// `spawn_sidebar`) and `write_tty` are fire-and-forget effects.
 pub trait TmuxEnv {
     fn fetch_windows(&self, socket: &str) -> crate::tmux::FetchResult;
     /// The real (non-sidebar) pane ids of one window, for the alone-sidebar check.
@@ -46,6 +47,11 @@ pub trait TmuxEnv {
     fn focus(&self, socket: &str, window: &str, pane: Option<&str>);
     fn toggle(&self, socket: &str);
     fn focus_key(&self, socket: &str);
+    /// Whether the session holding `window` has the sidebar on (any pane of it is
+    /// a sidebar).
+    fn session_has_sidebar(&self, socket: &str, window: &str) -> bool;
+    /// Give one window a sidebar pane, unless it already has one.
+    fn spawn_sidebar(&self, socket: &str, window: &str);
     /// The tty path of a pane, for the bell.
     fn pane_tty(&self, socket: &str, pane: &str) -> String;
     /// The ttys of every client attached to the session showing `pane`, for the
@@ -466,6 +472,36 @@ impl State {
         }
     }
 
+    /// Handle one control-mode event, and report whether this server is still
+    /// watched, which is what makes repolling it worthwhile: a window appearing
+    /// changes the rows whether or not it is one this gives a sidebar to.
+    ///
+    /// A new window gets a sidebar when the session holding it has the sidebar
+    /// on, which is what keeps every window of that session carrying one. The
+    /// listener spans the whole server, so the session is asked about
+    /// separately: a window born into a session with no sidebar (a session just
+    /// created, or one toggled off while another still has one) would otherwise
+    /// get a pane whose rows are never about it, since the tree a sidebar draws
+    /// is the server's current session.
+    pub fn on_control<E: TmuxEnv>(
+        &self,
+        env: &E,
+        server: &ServerKey,
+        event: &ControlEvent,
+    ) -> bool {
+        if !self.servers.contains_key(server) {
+            return false;
+        }
+        match event {
+            ControlEvent::WindowAdd(window) => {
+                if env.session_has_sidebar(&server.0, &window.0) {
+                    env.spawn_sidebar(&server.0, &window.0);
+                }
+            }
+        }
+        true
+    }
+
     /// Drop a client. When its server has no clients left, forget that server's
     /// shared UI state; the next `Hello` recreates it.
     pub fn on_disconnect(&mut self, conn: ConnId) {
@@ -850,6 +886,12 @@ impl TmuxEnv for RealTmux {
     fn focus_key(&self, socket: &str) {
         crate::tmux::focus_key(socket);
     }
+    fn session_has_sidebar(&self, socket: &str, window: &str) -> bool {
+        crate::tmux::session_has_sidebar(socket, window)
+    }
+    fn spawn_sidebar(&self, socket: &str, window: &str) {
+        crate::tmux::spawn(socket, window);
+    }
     fn pane_tty(&self, socket: &str, pane: &str) -> String {
         crate::tmux::run_tmux(
             socket,
@@ -888,6 +930,7 @@ mod tests {
     use crate::proto::{HookAction, InputEvent};
     use crate::tmux::{parse_windows, FetchResult};
     use std::cell::RefCell;
+    use std::collections::HashSet;
 
     /// The lines a pushed tree draws. The layout assertions read as the sidebar
     /// looks, which is what makes a grouping change visible in them.
@@ -908,6 +951,9 @@ mod tests {
         parents: HashMap<u32, u32>,
         writes: RefCell<Vec<(String, String)>>,
         focuses: RefCell<Vec<(String, Option<String>)>>,
+        spawns: RefCell<Vec<(String, String)>>,
+        /// The windows whose session reads as having the sidebar on.
+        sidebar_sessions: HashSet<(String, String)>,
     }
 
     impl FakeTmux {
@@ -923,6 +969,11 @@ mod tests {
         }
         fn with_parent(mut self, pid: u32, ppid: u32) -> Self {
             self.parents.insert(pid, ppid);
+            self
+        }
+        fn with_sidebar_session(mut self, socket: &str, window: &str) -> Self {
+            self.sidebar_sessions
+                .insert((socket.to_string(), window.to_string()));
             self
         }
     }
@@ -954,6 +1005,15 @@ mod tests {
         }
         fn toggle(&self, _socket: &str) {}
         fn focus_key(&self, _socket: &str) {}
+        fn session_has_sidebar(&self, socket: &str, window: &str) -> bool {
+            self.sidebar_sessions
+                .contains(&(socket.to_string(), window.to_string()))
+        }
+        fn spawn_sidebar(&self, socket: &str, window: &str) {
+            self.spawns
+                .borrow_mut()
+                .push((socket.to_string(), window.to_string()));
+        }
         fn pane_tty(&self, _socket: &str, pane: &str) -> String {
             format!("/tty/pane/{pane}")
         }
@@ -1520,6 +1580,51 @@ mod tests {
                 .any(|(_, m)| matches!(m, ServerMsg::Render(_))),
             "an alone sidebar gets no render"
         );
+    }
+
+    #[test]
+    fn a_new_window_gets_a_sidebar() {
+        let env = env_for(true).with_sidebar_session("/s", "@7");
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+
+        let server = ServerKey("/s".into());
+        let added = ControlEvent::WindowAdd(WindowId("@7".into()));
+        assert!(state.on_control(&env, &server, &added));
+        assert_eq!(
+            *env.spawns.borrow(),
+            vec![("/s".to_string(), "@7".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_new_window_whose_session_has_no_sidebar_is_left_alone() {
+        // The listener spans the server, so it reports windows born into
+        // sessions the sidebar was never turned on for.
+        let env = env_for(true);
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+
+        let server = ServerKey("/s".into());
+        let added = ControlEvent::WindowAdd(WindowId("@7".into()));
+        // Still worth repolling: the window may be one the rows cover.
+        assert!(state.on_control(&env, &server, &added));
+        assert!(env.spawns.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_window_added_after_the_sidebar_is_gone_spawns_nothing() {
+        // The sidebar was toggled off (its last client left) between tmux
+        // reporting the window and this running.
+        let env = env_for(true);
+        let mut state = State::new();
+        hello_client(&mut state, &env, 0);
+        state.on_disconnect(ConnId(0));
+
+        let server = ServerKey("/s".into());
+        let added = ControlEvent::WindowAdd(WindowId("@7".into()));
+        assert!(!state.on_control(&env, &server, &added));
+        assert!(env.spawns.borrow().is_empty());
     }
 
     #[test]

@@ -28,7 +28,7 @@ in the terminal it draws in.
 
 ## Requirements
 
-- tmux ≥ 3.1
+- tmux ≥ 3.2
 
 The plugin is a single Rust binary that it manages for you. On first load, and
 after every update, it downloads the prebuilt binary matching the commit you

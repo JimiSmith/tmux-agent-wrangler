@@ -2,12 +2,14 @@
 //! fed by one channel from the socket readers and a poll timer.
 //!
 //! A connection's reader thread forwards each decoded line as an [`Event`]; a
-//! timer thread emits [`Event::Poll`] once a second. The core loop owns [`State`]
-//! and the client write handles, processes events serially, and writes each
-//! resulting push back to its connection. The model-building modules it drives
-//! stay pure and testable.
+//! timer thread emits [`Event::Poll`] once a second, and each watched server's
+//! control-mode listener forwards what tmux pushes. The core loop owns [`State`],
+//! the client write handles and the listeners, processes events serially, and
+//! writes each resulting push back to its connection. The model-building modules
+//! it drives stay pure and testable.
 
 pub mod assoc;
+pub mod control;
 pub mod notify;
 pub mod persist;
 pub mod rows;
@@ -23,6 +25,7 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 
+use crate::daemon::control::{ControlEvent, Listener};
 use crate::daemon::state::{ConnId, RealTmux, State, TmuxEnv};
 use crate::model::ServerKey;
 use crate::paths::{daemon_pidfile, daemon_socket, state_dir};
@@ -34,9 +37,21 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// An input to the core loop. Every socket line, connection lifecycle change, and
 /// timer tick reaches the core as one of these.
 enum Event {
-    Connected { conn: ConnId, writer: UnixStream },
-    Inbound { conn: ConnId, msg: Inbound },
-    Disconnected { conn: ConnId },
+    Connected {
+        conn: ConnId,
+        writer: UnixStream,
+    },
+    Inbound {
+        conn: ConnId,
+        msg: Inbound,
+    },
+    Disconnected {
+        conn: ConnId,
+    },
+    Control {
+        server: ServerKey,
+        event: ControlEvent,
+    },
     Poll,
 }
 
@@ -166,13 +181,43 @@ fn spawn_poller(tx: Sender<Event>) {
     });
 }
 
-/// The single-owner core: own the state and the write handles, and process events
-/// serially, writing each push to its connection.
-fn core_loop(rx: mpsc::Receiver<Event>) {
+/// Keep one control-mode listener per watched server.
+///
+/// A server is watched for exactly as long as it has sidebar clients, which is
+/// the same lifetime as its [`State::servers`] entry: the sidebar being on is
+/// what makes tmux's notifications worth acting on, so nothing is attached while
+/// it is off. Dropping a listener stops it.
+fn sync_listeners(
+    listeners: &mut IndexMap<ServerKey, Listener>,
+    state: &State,
+    tx: &Sender<Event>,
+) {
+    listeners.retain(|server, _| state.servers.contains_key(server));
+    for server in state.servers.keys() {
+        if listeners.contains_key(server) {
+            continue;
+        }
+        let tx = tx.clone();
+        let emit_server = server.clone();
+        let listener = control::listen(server.clone(), move |event| {
+            tx.send(Event::Control {
+                server: emit_server.clone(),
+                event,
+            })
+            .is_ok()
+        });
+        listeners.insert(server.clone(), listener);
+    }
+}
+
+/// The single-owner core: own the state, the write handles and the control-mode
+/// listeners, and process events serially, writing each push to its connection.
+fn core_loop(rx: mpsc::Receiver<Event>, tx: Sender<Event>) {
     let env = RealTmux;
     let mut state = State::new();
     state.load_records(persist::load());
     let mut writers: IndexMap<ConnId, UnixStream> = IndexMap::new();
+    let mut listeners: IndexMap<ServerKey, Listener> = IndexMap::new();
 
     while let Ok(ev) = rx.recv() {
         let mut pushes: Vec<(ConnId, ServerMsg)> = Vec::new();
@@ -183,6 +228,12 @@ fn core_loop(rx: mpsc::Receiver<Event>) {
             Event::Disconnected { conn } => {
                 writers.shift_remove(&conn);
                 state.on_disconnect(conn);
+            }
+            Event::Control { server, event } => {
+                if state.on_control(&env, &server, &event) {
+                    let parents = env.ppid_map();
+                    state.poll_server(&env, &server, &parents, &mut pushes);
+                }
             }
             Event::Poll => {
                 let parents = env.ppid_map();
@@ -248,6 +299,8 @@ fn core_loop(rx: mpsc::Receiver<Event>) {
                 }
             }
         }
+
+        sync_listeners(&mut listeners, &state, &tx);
     }
 }
 
@@ -270,8 +323,8 @@ pub fn run(replace: bool) -> ExitCode {
 
     let (tx, rx) = mpsc::channel::<Event>();
     spawn_acceptor(listener, tx.clone());
-    spawn_poller(tx);
-    core_loop(rx);
+    spawn_poller(tx.clone());
+    core_loop(rx, tx);
 
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(daemon_pidfile());

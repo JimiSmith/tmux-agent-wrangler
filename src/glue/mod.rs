@@ -1,10 +1,10 @@
 //! The tmux glue: the plugin entry point and the key/hook-bound subcommands.
 //!
-//! `tmux-entry` runs at plugin load to bind keys, install the new-window hooks
-//! and the rename guard, optionally install the agent hooks, and start the
-//! daemon. `toggle`, `focus`, and `spawn` are bound to keys or tmux hooks and
-//! drive the sidebar panes directly (server-side tmux operations); the daemon is
-//! reached only for state and rendering, so the glue works even before it is up.
+//! `tmux-entry` runs at plugin load to bind keys, install the rename guard,
+//! optionally install the agent hooks, and start the daemon. `toggle` and
+//! `focus` are bound to keys and drive the sidebar panes directly (server-side
+//! tmux operations); the daemon is reached only for state and rendering, so both
+//! keys work even before it is up.
 
 pub mod install;
 
@@ -68,10 +68,9 @@ fn start_daemon(exe: &str, replace: bool) {
 }
 
 /// The plugin entry point: bind the toggle/focus keys to this binary, install the
-/// new-window/break-pane spawn hooks and the automatic-rename guard, optionally
-/// install the agent hooks, and start the daemon. `replace_daemon` (set when the
-/// wrapper just rebuilt the binary) evicts a running daemon so the new build takes
-/// over.
+/// automatic-rename guard, optionally install the agent hooks, and start the
+/// daemon. `replace_daemon` (set when the wrapper just rebuilt the binary) evicts
+/// a running daemon so the new build takes over.
 pub fn tmux_entry(replace_daemon: bool) -> ExitCode {
     let Some(socket) = server_socket() else {
         eprintln!("wrangler tmux-entry: not inside a tmux server");
@@ -112,18 +111,15 @@ pub fn tmux_entry(replace_daemon: bool) -> ExitCode {
         );
     }
 
-    // Windows created while the sidebar is on get their own sidebar pane.
-    let spawn_hook = format!("run-shell '{quoted_exe} spawn --if-active'");
-    run_tmux(
-        &socket,
-        &["set-hook", "-g", "after-new-window", &spawn_hook],
-    );
-    run_tmux(
-        &socket,
-        &["set-hook", "-g", "after-break-pane", &spawn_hook],
-    );
-    // Keep the session-window-changed hook unset.
-    run_tmux(&socket, &["set-hook", "-gu", "session-window-changed"]);
+    // Unset the global hooks this plugin owns: a hook set here spawns sidebar
+    // panes into windows that already have one.
+    for hook in [
+        "after-new-window",
+        "after-break-pane",
+        "session-window-changed",
+    ] {
+        run_tmux(&socket, &["set-hook", "-gu", hook]);
+    }
 
     // automatic-rename uses the active pane's command, so focusing the sidebar
     // would rename the window. Guard the format so the window keeps its name
@@ -157,24 +153,5 @@ pub fn focus() -> ExitCode {
         return ExitCode::from(2);
     };
     crate::tmux::focus_key(&socket);
-    ExitCode::SUCCESS
-}
-
-/// Spawn a sidebar pane. `args`: an optional `--if-active` (only when the session
-/// already has sidebars) and an optional target window id.
-pub fn spawn(args: &[String]) -> ExitCode {
-    let Some(socket) = server_socket() else {
-        return ExitCode::from(2);
-    };
-    let mut if_active = false;
-    let mut window: Option<String> = None;
-    for arg in args {
-        if arg == "--if-active" {
-            if_active = true;
-        } else {
-            window = Some(arg.clone());
-        }
-    }
-    crate::tmux::spawn(&socket, if_active, window.as_deref());
     ExitCode::SUCCESS
 }

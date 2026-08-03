@@ -3,8 +3,7 @@
 use std::env;
 use std::process::{exit, ExitCode};
 
-const USAGE: &str =
-    "usage: wrangler <daemon|client|hook|toggle|focus|spawn|install-hooks|tmux-entry>";
+const USAGE: &str = "usage: wrangler <daemon|client|hook|toggle|focus|install-hooks|tmux-entry>";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -16,7 +15,6 @@ fn main() -> ExitCode {
         Some("tmux-entry") => wrangler::glue::tmux_entry(has("--replace-daemon")),
         Some("toggle") => wrangler::glue::toggle(),
         Some("focus") => wrangler::glue::focus(),
-        Some("spawn") => wrangler::glue::spawn(&args[2..]),
         Some("install-hooks") => wrangler::glue::install::run(&args[2..]),
         Some(other) => {
             eprintln!("wrangler: unknown subcommand '{other}'\n{USAGE}");

@@ -10,7 +10,7 @@ session's windows, their panes as a tree, and active AI-agent sessions
 runs in several roles: an always-on daemon holding all state, a thin ratatui
 render client per sidebar pane, a hook client the agents invoke, and the
 tmux-facing glue commands. They coordinate over one Unix socket. The only
-runtime dependency is `tmux ≥ 3.1`.
+runtime dependency is `tmux ≥ 3.2`.
 
 `wrangler.tmux` (the TPM entry point) keeps the binary at one path,
 `$XDG_CACHE_HOME/tmux-agent-wrangler/wrangler-<short-sha>`, whether it was
@@ -46,7 +46,7 @@ composed with `client::render::row_text`: parity is a property of the two
 together, so the test deliberately reaches across the layer.
 
 **Never run the side-effecting subcommands against the live tmux server.**
-`tmux-entry`, `toggle`, `focus`, `spawn`, and `install-hooks` mutate real state:
+`tmux-entry`, `toggle`, `focus`, and `install-hooks` mutate real state:
 they rebind keys, set hooks, start/replace the daemon, and (when
 `@wrangler-auto-install-hooks` is on) rewrite the user's `~/.claude/settings.json`
 and `~/.copilot/hooks/wrangler.json`. Development happens inside tmux, so `$TMUX`
@@ -95,11 +95,13 @@ pane-less (daemon-hosted) session is title-matched on every server.
   sends one `HookEvent`. It starts the daemon if none is running.
 
 - **the glue** (`src/glue/mod.rs`) — `tmux-entry` runs at plugin load: it binds
-  the toggle/focus keys, installs the `after-new-window` / `after-break-pane`
-  spawn hooks, patches `automatic-rename-format` so focusing a sidebar pane does
-  not rename the window, optionally installs the agent hooks, and starts the
-  daemon. `toggle`, `focus`, and `spawn` are bound to keys and hooks and drive
-  the sidebar panes through server-side tmux operations, so they work even
+  the toggle/focus keys, patches `automatic-rename-format` so focusing a sidebar
+  pane does not rename the window, optionally installs the agent hooks, and
+  starts the daemon. It also unsets the global tmux hooks this plugin owns
+  (`after-new-window`, `after-break-pane`, `session-window-changed`), since one
+  left set by an older release would spawn a second sidebar into a window the
+  daemon has already given one. `toggle` and `focus` are bound to keys and drive
+  the sidebar panes through server-side tmux operations, so both work even
   before the daemon is up.
 
 ### The daemon core
@@ -107,7 +109,8 @@ pane-less (daemon-hosted) session is title-matched on every server.
 `src/daemon/mod.rs` runs a **single-owner core loop**: all state lives in one
 `State`, fed by one mpsc channel and processed serially. Each connection gets a
 reader thread that forwards decoded lines as an `Event`; a timer thread emits
-`Event::Poll` every second. Nothing else touches the state, so there are no
+`Event::Poll` every second; each watched server's control-mode listener forwards
+an `Event::Control`. Nothing else touches the state, so there are no
 locks around it. This is std threads and `std::sync::mpsc`, not an async
 runtime; the concurrency model is the same either way.
 
@@ -116,6 +119,24 @@ runtime; the concurrency model is the same either way.
   tty access goes through the **`TmuxEnv` trait**, which is the seam that makes
   the whole thing testable; `RealTmux` implements it over `src/tmux.rs`.
   Per-server state (`ServerState`) holds the shared selection and width.
+
+- **`control.rs`** — the control-mode listener, one `tmux -C attach` client per
+  watched server, which is what gives a window created while the sidebar is on
+  its own sidebar pane. A server is watched for exactly as long as it has
+  sidebar clients, the same lifetime as its `ServerState`; the core loop owns the
+  listeners beside the client write handles and syncs them against
+  `state.servers` after every event. Being watched is a per-server fact and the
+  sidebar is toggled per session, so `on_control` asks whether the new window's
+  session has one before spawning. The attach carries `no-output` (or every
+  byte written by every pane in the attached session arrives as an `%output`
+  line) and `ignore-size` (or a client that renders nothing takes part in sizing
+  the user's windows). The child's stdin is a pipe the daemon holds and never
+  writes to: `tmux -C` exits when its stdin closes, which is what reaps the
+  client when the daemon is killed outright. `%window-add` and
+  `%unlinked-window-add` are the same event from either side of the attached
+  session, so both mean one new window on this server. Parsing is pure
+  (`parse_line`) and everything else, command replies included, is dropped by
+  the reader before it can reach the core.
 
 - **`assoc.rs`** — which panes and windows are displaying a session. A record's
   recorded pane counts as a placement only when the agent actually occupies it
@@ -268,6 +289,15 @@ client with the others following.
 
 ### Sidebar lifecycle
 
+`toggle` spawns one sidebar per window and kills every sidebar pane on the
+server; between those two, a window created while the sidebar is on gets its
+sidebar from the daemon's control-mode listener, however that window came into
+being (tmux reports `break-pane` and a new session's first window as the same
+window-add). Whether it gets one is asked of the window's own *session*: the
+listener spans the server, but the tree a sidebar draws is the server's current
+session, so a pane put into a session the sidebar was never turned on for would
+show rows that are never about it.
+
 A sidebar must never be alone in a window (it would expand to full width and
 keep an empty window alive). The daemon pushes `ServerMsg::Exit` when a client's
 window has no real panes left: immediately on the resize that the closing pane
@@ -276,8 +306,8 @@ triggers, and again from the poll as a backstop. That resize is deliberately
 sidebar wide before it exits. Clients also self-exit on a spawn race, when a
 lower-numbered sidebar pane occupies the same window.
 
-The ~1s worst case on the poll backstop is inherent to polling; control-mode
-push would remove it.
+The ~1s worst case on the poll backstop is inherent to polling: the listener
+reports the window that appeared, not the layout change that emptied one.
 
 ### Hook installation (`src/glue/install.rs`)
 

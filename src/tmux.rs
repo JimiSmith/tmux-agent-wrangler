@@ -253,12 +253,24 @@ pub fn spawn_race_survivor(sidebars: &[PaneId]) -> Option<&PaneId> {
         .min_by_key(|p| p.numeric().unwrap_or(u64::MAX))
 }
 
-/// Whether any pane in the session has the `@wrangler_sidebar` flag set (the
-/// sidebar is toggled on for this server).
-fn session_has_sidebar(socket: &str) -> bool {
-    run_tmux(socket, &["list-panes", "-s", "-F", "#{@wrangler_sidebar}"])
-        .lines()
-        .any(|l| l == "1")
+/// Whether any pane in the session holding `window` is a sidebar, which is what
+/// "the sidebar is on" means for that session. `list-panes -s` takes a window id
+/// as naming the session that owns it, so this reads the whole session in one
+/// call.
+pub fn session_has_sidebar(socket: &str, window: &str) -> bool {
+    run_tmux(
+        socket,
+        &[
+            "list-panes",
+            "-s",
+            "-t",
+            window,
+            "-F",
+            "#{@wrangler_sidebar}",
+        ],
+    )
+    .lines()
+    .any(|l| l == "1")
 }
 
 /// Whether the given window already holds a sidebar pane.
@@ -296,27 +308,14 @@ fn sidebar_command() -> String {
 
 /// Split a sidebar pane into a window unless it already has one, and tag it.
 ///
-/// `window` defaults to the server's current window. With `if_active`, this is a
-/// no-op unless the session already has a sidebar (so the new-window hooks only
-/// spawn while toggled on). A window that already holds a sidebar is left
-/// untouched. The new pane is a full-height column placed on the left at the
-/// configured width, then flagged with the `@wrangler_sidebar` pane option that
-/// marks it a sidebar everywhere.
-pub fn spawn(socket: &str, if_active: bool, window: Option<&str>) {
-    let win = match window {
-        Some(w) => w.to_string(),
-        None => run_tmux(socket, &["display-message", "-p", "#{window_id}"])
-            .trim()
-            .to_string(),
-    };
-    if win.is_empty() {
+/// A window that already holds a sidebar is left untouched. The new pane is a
+/// full-height column placed on the left at the configured width, then flagged
+/// with the `@wrangler_sidebar` pane option that marks it a sidebar everywhere.
+pub fn spawn(socket: &str, window: &str) {
+    if window.is_empty() {
         return;
     }
-
-    if if_active && !session_has_sidebar(socket) {
-        return;
-    }
-    if window_has_sidebar(socket, &win) {
+    if window_has_sidebar(socket, window) {
         return;
     }
 
@@ -333,7 +332,7 @@ pub fn spawn(socket: &str, if_active: bool, window: Option<&str>) {
             "-l",
             &width,
             "-t",
-            &win,
+            window,
             "-P",
             "-F",
             "#{pane_id}",
@@ -378,10 +377,7 @@ pub fn toggle(socket: &str) {
 
     let windows = run_tmux(socket, &["list-windows", "-F", "#{window_id}"]);
     for win in windows.lines() {
-        let win = win.trim();
-        if !win.is_empty() {
-            spawn(socket, false, Some(win));
-        }
+        spawn(socket, win.trim());
     }
 }
 
