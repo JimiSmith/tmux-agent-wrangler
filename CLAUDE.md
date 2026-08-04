@@ -118,7 +118,15 @@ runtime; the concurrency model is the same either way.
   `on_input`, `on_hook`, `on_disconnect`, `poll_server`). All tmux, `ps`, and
   tty access goes through the **`TmuxEnv` trait**, which is the seam that makes
   the whole thing testable; `RealTmux` implements it over `src/tmux.rs`.
-  Per-server state (`ServerState`) holds the shared selection and width.
+
+  The unit of a drawn view is the *(server, session)* pair, not the server:
+  `poll_server` resolves which session each sidebar draws, then polls each of
+  those sessions in turn, and `ServerState` holds one `ViewState` (the shared
+  selection, width and notification entries) per session a sidebar is in. A
+  server keys the map because that is the lifetime the control-mode listeners are
+  synced against; the view keys what is drawn. The sessions polled are exactly
+  the ones a sidebar is in, so an agent in a session with no sidebar raises no
+  attention.
 
 - **`control.rs`** — the control-mode listener, one `tmux -C attach` client per
   watched server, which is what gives a window created while the sidebar is on
@@ -243,9 +251,10 @@ runtime; the concurrency model is the same either way.
   never disagree about what fired, and the area fills whether or not the other
   two are enabled. An entry carries the same two strings the escape does — the
   agent as its title, `notification_text` as its message — so what popped up and
-  what is listed say the same thing. `ServerState` holds the entries (newest
+  what is listed say the same thing. `ViewState` holds the entries (newest
   first, one per session, `NOTIFICATION_LIMIT` of them) beside the selection, so
-  a server's sidebars show and dismiss one area. Every poll re-reads each entry's
+  the sidebars drawing one session show and dismiss one area, and an agent is
+  listed in the view it is visible from. Every poll re-reads each entry's
   pane and message from the placements and drops one that is displayed nowhere:
   an entry is a live pointer, not a log line, and opening it lands where the
   agent is now. Its key is a `RowKey::Notification` rather than the agent row's
@@ -282,7 +291,9 @@ resized at a time in practice. A *user* resize (tmux resized the pane) is
 clamped to the `WidthBounds` (whose ceiling is raised to its floor on
 construction, so a max below the min is simply the min) and published to the
 daemon, which relays a
-`Width` message to the other clients on that server; they adopt it. A resize the
+`Width` message to the other clients *drawing the same session*; they adopt it.
+A width is a property of the view, so resizing one session's sidebar leaves
+another session's alone. A resize the
 client asked for itself is swallowed via a recorded `pending` width, so an
 adopted width never echoes back as a new user resize. The result is one "lead"
 client with the others following.
@@ -304,9 +315,20 @@ Between the two, a window created while the sidebar is on gets its
 sidebar from the daemon's control-mode listener, however that window came into
 being (tmux reports `break-pane` and a new session's first window as the same
 window-add). Whether it gets one is asked of the window's own *session*: the
-listener spans the server, but the tree a sidebar draws is the server's current
-session, so a pane put into a session the sidebar was never turned on for would
-show rows that are never about it.
+listener spans the server, so a pane put into a session the sidebar was never
+turned on for would otherwise get one the user never asked that session for.
+
+**A sidebar draws the session its own window belongs to** (`view_session`),
+resolved from the *(session, window)* relation rather than reported by the
+client. Every tmux read behind it is targeted at that session, because an
+untargeted `list-windows` resolves against whichever session tmux considers
+current — for the daemon, with no client attached, the one with the most recent
+activity — so a sidebar would follow the user's focus into a session it is not
+in. Targeting is also what makes `window_active` mean anything: it is a fact
+about the *(session, window)* link, and a window linked into two sessions is
+active in one and not the other. A window held by one session therefore draws it
+whatever else is going on; a window linked into several follows the most recently
+used of *those*, re-resolved every poll.
 
 A sidebar must never be alone in a window (it would expand to full width and
 keep an empty window alive). The daemon pushes `ServerMsg::Exit` when a client's

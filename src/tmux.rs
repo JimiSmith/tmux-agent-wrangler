@@ -31,6 +31,10 @@ const SESSION_WINDOW_FORMAT: &str = "#{session_id}\t#{window_id}";
 /// window a pane is in, the pane, and its sidebar flag.
 const SIDEBAR_SCAN_FORMAT: &str = "#{window_id}\t#{pane_id}\t#{@wrangler_sidebar}";
 
+/// The `list-sessions` format the session ranking is derived from: the session,
+/// whether a client is attached to it, and its last activity.
+const SESSION_RANK_FORMAT: &str = "#{session_id}\t#{session_attached}\t#{session_activity}";
+
 /// The whole window/pane model read from a server in one pass: the ordered
 /// window tree plus the per-pane lookup maps other layers need to place agent
 /// sessions and enforce the one-sidebar-per-window invariant.
@@ -178,11 +182,41 @@ pub fn parse_windows(list_windows_out: &str, list_panes_out: &str) -> FetchResul
     result
 }
 
-/// Query a server and build its full window/pane model.
-pub fn fetch_windows(socket: &str) -> FetchResult {
-    let windows_out = run_tmux(socket, &["list-windows", "-F", WINDOW_FORMAT]);
-    let panes_out = run_tmux(socket, &["list-panes", "-s", "-F", PANE_FORMAT]);
+/// Query one *session* of a server and build its window/pane model.
+///
+/// Both reads are targeted (`-t <session>`). An untargeted `list-windows` is
+/// resolved by tmux against whichever session it considers current, which for a
+/// caller with no attached client is the one with the most recent activity — so
+/// the window list would follow the user's focus across sessions rather than
+/// describing the session asked about. Targeting also makes `window_active`
+/// meaningful: it is a fact about the *(session, window)* link, and a window
+/// linked into two sessions is active in one and not the other.
+pub fn fetch_windows(socket: &str, session: &TmuxSessionId) -> FetchResult {
+    let windows_out = run_tmux(
+        socket,
+        &["list-windows", "-t", &session.0, "-F", WINDOW_FORMAT],
+    );
+    let panes_out = run_tmux(
+        socket,
+        &["list-panes", "-s", "-t", &session.0, "-F", PANE_FORMAT],
+    );
     parse_windows(&windows_out, &panes_out)
+}
+
+/// The *(session, window)* relation for a whole server.
+pub fn session_windows(socket: &str) -> Vec<(TmuxSessionId, WindowId)> {
+    parse_session_windows(&run_tmux(
+        socket,
+        &["list-windows", "-a", "-F", SESSION_WINDOW_FORMAT],
+    ))
+}
+
+/// The server's sessions, most recently used first.
+pub fn session_ranking(socket: &str) -> Vec<TmuxSessionId> {
+    parse_session_ranking(&run_tmux(
+        socket,
+        &["list-sessions", "-F", SESSION_RANK_FORMAT],
+    ))
 }
 
 /// The real (non-sidebar) pane ids of one window, in tmux emission order. A pane
@@ -374,6 +408,51 @@ pub fn parse_session_windows(out: &str) -> Vec<(TmuxSessionId, WindowId)> {
         .collect()
 }
 
+/// Rank the sessions of `list-sessions` output most recently used first. Pure.
+///
+/// An attached session outranks a detached one, then higher `session_activity`
+/// wins, then the session id breaks the tie so the order is total and stable.
+/// tmux advances a session's activity when a client switches to it, which is
+/// what makes this track the user's focus. A line missing any of the three
+/// fields, or carrying a non-numeric one, is skipped.
+pub fn parse_session_ranking(out: &str) -> Vec<TmuxSessionId> {
+    let mut rows: Vec<(bool, u64, &str)> = out
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let id = fields.next()?;
+            let attached = fields.next()?.parse::<u32>().ok()?;
+            let activity = fields.next()?.parse::<u64>().ok()?;
+            (!id.is_empty()).then_some((attached > 0, activity, id))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(b.2)));
+    rows.into_iter()
+        .map(|(_, _, id)| TmuxSessionId(id.to_string()))
+        .collect()
+}
+
+/// The session a sidebar in `window` should draw: the session that window
+/// belongs to, or for a window linked into several, the most recently used of
+/// *those* (its position in `ranking`). `None` when the window is in no session,
+/// which means it is gone.
+///
+/// Pure. A sidebar's view is a fact about its own window, so a window held by
+/// one session resolves to that session whatever the user is looking at
+/// elsewhere on the server. A session absent from `ranking` sorts last, so an
+/// incomplete ranking still yields an answer rather than none.
+pub fn view_session(
+    relation: &[(TmuxSessionId, WindowId)],
+    ranking: &[TmuxSessionId],
+    window: &WindowId,
+) -> Option<TmuxSessionId> {
+    relation
+        .iter()
+        .filter(|(_, w)| w == window)
+        .min_by_key(|(s, _)| ranking.iter().position(|r| r == s).unwrap_or(usize::MAX))
+        .map(|(s, _)| s.clone())
+}
+
 /// Every window reachable from `session` by following shared windows: the
 /// windows of `session`, of every session sharing one of those, and so on.
 ///
@@ -454,10 +533,7 @@ pub fn toggle(socket: &str) {
         return;
     }
 
-    let relation = parse_session_windows(&run_tmux(
-        socket,
-        &["list-windows", "-a", "-F", SESSION_WINDOW_FORMAT],
-    ));
+    let relation = session_windows(socket);
     let windows = component_windows(&relation, &session);
     if windows.is_empty() {
         return;
@@ -713,6 +789,75 @@ mod tests {
     fn an_unknown_session_has_no_windows() {
         let relation = parse_session_windows(MIXED);
         assert!(component_windows(&relation, &TmuxSessionId("$9".into())).is_empty());
+    }
+
+    fn ranking(ids: &[&str]) -> Vec<TmuxSessionId> {
+        ids.iter().map(|i| TmuxSessionId(i.to_string())).collect()
+    }
+
+    #[test]
+    fn a_window_held_by_one_session_ignores_the_ranking() {
+        // The reported bug: two disjoint sessions, and the sidebar in $1's window
+        // must draw $1 however recently $0 was used.
+        let relation = parse_session_windows("$0\t@0\n$1\t@1");
+        for order in [ranking(&["$0", "$1"]), ranking(&["$1", "$0"])] {
+            assert_eq!(
+                view_session(&relation, &order, &WindowId("@1".into())),
+                Some(TmuxSessionId("$1".into()))
+            );
+        }
+    }
+
+    #[test]
+    fn a_linked_window_follows_the_ranking() {
+        // @2 is linked into both $0 and $1, so the sidebar in it draws whichever
+        // of the two the user is in.
+        let relation = parse_session_windows(MIXED);
+        assert_eq!(
+            view_session(&relation, &ranking(&["$1", "$0"]), &WindowId("@2".into())),
+            Some(TmuxSessionId("$1".into()))
+        );
+        assert_eq!(
+            view_session(&relation, &ranking(&["$0", "$1"]), &WindowId("@2".into())),
+            Some(TmuxSessionId("$0".into()))
+        );
+    }
+
+    #[test]
+    fn a_window_in_no_session_has_no_view() {
+        let relation = parse_session_windows(MIXED);
+        assert_eq!(
+            view_session(&relation, &ranking(&["$0"]), &WindowId("@9".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unranked_session_still_resolves() {
+        // A ranking that names neither session must still yield the window's own
+        // session rather than dropping the sidebar's view entirely.
+        let relation = parse_session_windows("$3\t@7");
+        assert_eq!(
+            view_session(&relation, &ranking(&["$0"]), &WindowId("@7".into())),
+            Some(TmuxSessionId("$3".into()))
+        );
+    }
+
+    #[test]
+    fn sessions_rank_attached_first_then_by_activity() {
+        // $2 is attached and so outranks the more recently active $1; $3 and $4
+        // tie on activity and fall back to the session id.
+        let out = "$1\t0\t300\n$2\t1\t100\n$3\t0\t200\n$4\t0\t200";
+        assert_eq!(
+            parse_session_ranking(out),
+            ranking(&["$2", "$1", "$3", "$4"])
+        );
+    }
+
+    #[test]
+    fn malformed_ranking_lines_are_skipped() {
+        let out = "$0\t0\t100\nno-tabs\n$1\t0\nx\ty\tz\n\t0\t100\n$2\tnope\t100";
+        assert_eq!(parse_session_ranking(out), ranking(&["$0"]));
     }
 
     #[test]

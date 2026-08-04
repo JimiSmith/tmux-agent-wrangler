@@ -24,7 +24,8 @@ use crate::daemon::rows::build_tree;
 use crate::labels::{label_mode_from, LabelCache};
 use crate::model::{
     notification_ids, NamedColor, NotificationNode, PaneId, Placement, RowContent, RowKey,
-    RowModel, RowTree, ServerKey, Session, SessionKey, TurnStatus, ViewMode, Window, WindowId,
+    RowModel, RowTree, ServerKey, Session, SessionKey, TmuxSessionId, TurnStatus, ViewMode, Window,
+    WindowId,
 };
 use crate::proto::{HookAction, InputEvent, ServerMsg};
 
@@ -38,7 +39,16 @@ pub struct ConnId(pub u64);
 /// `client_ttys`) feed the poll; the actions (`focus`, `toggle`, `focus_key`,
 /// `spawn_sidebar`) and `write_tty` are fire-and-forget effects.
 pub trait TmuxEnv {
-    fn fetch_windows(&self, socket: &str) -> crate::tmux::FetchResult;
+    /// The window/pane model of one session. Scoped to a session because that is
+    /// what a sidebar draws, and because `window_active` differs between the
+    /// sessions sharing a window.
+    fn fetch_windows(&self, socket: &str, session: &TmuxSessionId) -> crate::tmux::FetchResult;
+    /// The server's *(session, window)* relation, which resolves a sidebar's
+    /// window to the session it draws.
+    fn session_windows(&self, socket: &str) -> Vec<(TmuxSessionId, WindowId)>;
+    /// The server's sessions, most recently used first, which picks the view for
+    /// a window linked into more than one.
+    fn session_ranking(&self, socket: &str) -> Vec<TmuxSessionId>;
     /// The real (non-sidebar) pane ids of one window, for the alone-sidebar check.
     fn window_real_panes(&self, socket: &str, window: &str) -> Vec<PaneId>;
     fn ppid_map(&self) -> HashMap<u32, u32>;
@@ -93,24 +103,42 @@ pub struct Notification {
     pub color: Option<NamedColor>,
 }
 
-/// Per-server shared UI state: the highlighted row, the column width sidebars on
-/// this server keep in sync, and the notification area's entries (newest first).
-/// The selection and width are absent until a client sets them.
+/// The UI state shared by the sidebars drawing one session: the highlighted row,
+/// the column width they keep in sync, and the notification area's entries
+/// (newest first). The selection and width are absent until a client sets them.
+///
+/// Shared per *view* rather than per server because the sidebars of two sessions
+/// draw different trees: one row id cannot name a row in both, and a width
+/// adopted across the boundary would resize a sidebar the user was not resizing.
 #[derive(Clone, Debug, Default)]
-pub struct ServerState {
+pub struct ViewState {
     pub selection: Option<RowKey>,
     pub width: Option<u16>,
     pub notifications: Vec<Notification>,
 }
 
-/// A connected sidebar client: which window's sidebar it is, on which server, its
-/// last reported width, and the last model pushed to it (so an unchanged rebuild
-/// is not re-sent).
+/// Per-server state: one [`ViewState`] per session a sidebar is drawing. Keyed by
+/// server (not by view) because the control-mode listeners are synced against
+/// exactly this key set, and a server is watched for as long as it has sidebars
+/// whatever sessions they are in.
+#[derive(Clone, Debug, Default)]
+pub struct ServerState {
+    pub views: IndexMap<TmuxSessionId, ViewState>,
+}
+
+/// A connected sidebar client: which window's sidebar it is, on which server, the
+/// session it draws, its last reported width, and the last model pushed to it (so
+/// an unchanged rebuild is not re-sent).
+///
+/// `session` is resolved from the window rather than reported by the client, and
+/// re-resolved every poll: a window linked into several sessions follows the most
+/// recently used of them.
 #[derive(Clone, Debug)]
 pub struct ClientConn {
     pub server: ServerKey,
     pub window: WindowId,
     pub pane: PaneId,
+    pub session: Option<TmuxSessionId>,
     pub cols: u16,
     pub last_pushed: Option<RowModel>,
 }
@@ -355,6 +383,9 @@ impl State {
                 server: server.clone(),
                 window,
                 pane,
+                // Left unresolved: the poll below reads the relation and fills it
+                // in, which is the same path every later poll takes.
+                session: None,
                 cols,
                 last_pushed: None,
             },
@@ -363,10 +394,34 @@ impl State {
         let mut pushes = Vec::new();
         let parents = env.ppid_map();
         self.poll_server(env, &server, &parents, &mut pushes);
-        if let Some(w) = self.servers.get(&server).and_then(|s| s.width) {
+        if let Some(w) = self
+            .client_view(conn)
+            .and_then(|(s, v)| self.view(&s, &v))
+            .and_then(|v| v.width)
+        {
             pushes.push((conn, ServerMsg::Width { cols: w }));
         }
         pushes
+    }
+
+    /// The view a connection draws, once the poll has resolved it.
+    fn client_view(&self, conn: ConnId) -> Option<(ServerKey, TmuxSessionId)> {
+        let c = self.clients.get(&conn)?;
+        Some((c.server.clone(), c.session.clone()?))
+    }
+
+    fn view(&self, server: &ServerKey, session: &TmuxSessionId) -> Option<&ViewState> {
+        self.servers.get(server)?.views.get(session)
+    }
+
+    /// The view's state, created empty if this is the first time it is touched.
+    fn view_mut(&mut self, server: &ServerKey, session: &TmuxSessionId) -> &mut ViewState {
+        self.servers
+            .entry(server.clone())
+            .or_default()
+            .views
+            .entry(session.clone())
+            .or_default()
     }
 
     /// Apply a client input event and return the resulting pushes.
@@ -380,28 +435,32 @@ impl State {
             return Vec::new();
         };
         let server = client.server.clone();
+        // Every event acts on the view the reporting client draws. A client whose
+        // session is unresolved is in a window tmux no longer lists, so there is
+        // no view for its row ids to mean anything in.
+        let view = client.session.clone();
         let mut pushes = Vec::new();
 
         match event {
             InputEvent::Select { key } => {
-                if let Some(s) = self.servers.get_mut(&server) {
-                    s.selection = Some(key);
+                if let Some(v) = &view {
+                    self.view_mut(&server, v).selection = Some(key);
                 }
                 let parents = env.ppid_map();
                 self.poll_server(env, &server, &parents, &mut pushes);
             }
             InputEvent::Activate { key } => {
-                self.activate(env, &server, &key);
-                if let Some(s) = self.servers.get_mut(&server) {
-                    s.selection = Some(key.clone());
-                }
-                // Opening one notification dismisses it and the entries sharing
-                // its pane, because the jump answers all of them at once; the
-                // rest are calls from elsewhere and stay. The selection then
-                // names a row that is gone, so the repoll below falls it back
-                // into the tree — onto the window just jumped to.
-                if let RowKey::Notification { session } = &key {
-                    self.dismiss_notification(&server, session);
+                if let Some(v) = &view {
+                    self.activate(env, &server, v, &key);
+                    self.view_mut(&server, v).selection = Some(key.clone());
+                    // Opening one notification dismisses it and the entries sharing
+                    // its pane, because the jump answers all of them at once; the
+                    // rest are calls from elsewhere and stay. The selection then
+                    // names a row that is gone, so the repoll below falls it back
+                    // into the tree — onto the window just jumped to.
+                    if let RowKey::Notification { session } = &key {
+                        self.dismiss_notification(&server, v, session);
+                    }
                 }
                 let parents = env.ppid_map();
                 self.poll_server(env, &server, &parents, &mut pushes);
@@ -416,17 +475,20 @@ impl State {
                     .unwrap_or(false);
                 if alone {
                     pushes.push((conn, ServerMsg::Exit));
-                } else {
-                    if let Some(s) = self.servers.get_mut(&server) {
-                        s.width = Some(cols);
-                    }
+                } else if let Some(v) = view {
+                    self.view_mut(&server, &v).width = Some(cols);
                     if let Some(c) = self.clients.get_mut(&conn) {
                         c.cols = cols;
                     }
+                    // Only the sidebars drawing the same session follow: a width
+                    // is adopted within a view, so resizing one session's sidebar
+                    // leaves another session's alone.
                     let others: Vec<ConnId> = self
                         .clients
                         .iter()
-                        .filter(|(id, c)| **id != conn && c.server == server)
+                        .filter(|(id, c)| {
+                            **id != conn && c.server == server && c.session.as_ref() == Some(&v)
+                        })
                         .map(|(id, _)| *id)
                         .collect();
                     for other in others {
@@ -448,8 +510,14 @@ impl State {
     /// window; a pane, agent or notification row selects that pane within its
     /// window. A notification names its pane through the entry the daemon holds,
     /// which the poll keeps current.
-    fn activate<E: TmuxEnv>(&self, env: &E, server: &ServerKey, key: &RowKey) {
-        let fetch = env.fetch_windows(&server.0);
+    fn activate<E: TmuxEnv>(
+        &self,
+        env: &E,
+        server: &ServerKey,
+        view: &TmuxSessionId,
+        key: &RowKey,
+    ) {
+        let fetch = env.fetch_windows(&server.0, view);
         let pane = match key {
             RowKey::Window { window } | RowKey::AgentWindow { window, .. } => {
                 env.focus(&server.0, &window.0, None);
@@ -458,9 +526,8 @@ impl State {
             RowKey::Pane { pane } | RowKey::Agent { pane, .. } => pane.clone(),
             RowKey::Notification { session } => {
                 let Some(n) = self
-                    .servers
-                    .get(server)
-                    .and_then(|s| s.notifications.iter().find(|n| &n.session == session))
+                    .view(server, view)
+                    .and_then(|v| v.notifications.iter().find(|n| &n.session == session))
                 else {
                     return;
                 };
@@ -481,8 +548,7 @@ impl State {
     /// listener spans the whole server, so the session is asked about
     /// separately: a window born into a session with no sidebar (a session just
     /// created, or one toggled off while another still has one) would otherwise
-    /// get a pane whose rows are never about it, since the tree a sidebar draws
-    /// is the server's current session.
+    /// get a pane the user never asked that session for.
     pub fn on_control<E: TmuxEnv>(
         &self,
         env: &E,
@@ -513,11 +579,14 @@ impl State {
         }
     }
 
-    /// Poll one server: read its windows, associate sessions, signal attention,
-    /// build the rows, and append a `Render` for each of its clients whose model
-    /// changed. Pruned registry entries are removed. An empty window read (a
-    /// transient failure or a momentarily unreachable server) is skipped without
-    /// touching state.
+    /// Poll one server: resolve which session each of its sidebars draws, then
+    /// poll each of those sessions.
+    ///
+    /// The sessions polled are exactly the ones a sidebar is in, so an agent in a
+    /// session with no sidebar is not scanned and raises no attention. An empty
+    /// relation (a transient failure or a momentarily unreachable server) is
+    /// skipped without touching state, leaving every client on the view it last
+    /// resolved to.
     pub fn poll_server<E: TmuxEnv>(
         &mut self,
         env: &E,
@@ -525,7 +594,56 @@ impl State {
         parents: &HashMap<u32, u32>,
         pushes: &mut Vec<(ConnId, ServerMsg)>,
     ) {
-        let fetch = env.fetch_windows(&server.0);
+        let relation = env.session_windows(&server.0);
+        if relation.is_empty() {
+            return;
+        }
+        let ranking = env.session_ranking(&server.0);
+
+        let conns: Vec<ConnId> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| &c.server == server)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut views: IndexSet<TmuxSessionId> = IndexSet::new();
+        for conn in conns {
+            let Some(client) = self.clients.get_mut(&conn) else {
+                continue;
+            };
+            // Re-resolved every poll, not just at Hello: a window linked into
+            // several sessions moves between views as the user switches session.
+            let session = crate::tmux::view_session(&relation, &ranking, &client.window);
+            client.session = session.clone();
+            if let Some(s) = session {
+                views.insert(s);
+            }
+        }
+
+        // A view no sidebar draws any more has no state worth keeping; the next
+        // client to land on it starts clean, as it would on a fresh server.
+        if let Some(state) = self.servers.get_mut(server) {
+            state.views.retain(|s, _| views.contains(s));
+        }
+
+        for view in views {
+            self.poll_view(env, server, &view, parents, pushes);
+        }
+    }
+
+    /// Poll one session of one server: read its windows, associate sessions,
+    /// signal attention, build the rows, and append a `Render` for each sidebar
+    /// drawing this session whose model changed. Pruned registry entries are
+    /// removed. An empty window read is skipped without touching state.
+    fn poll_view<E: TmuxEnv>(
+        &mut self,
+        env: &E,
+        server: &ServerKey,
+        view: &TmuxSessionId,
+        parents: &HashMap<u32, u32>,
+        pushes: &mut Vec<(ConnId, ServerMsg)>,
+    ) {
+        let fetch = env.fetch_windows(&server.0, view);
         if fetch.windows.is_empty() {
             return;
         }
@@ -576,16 +694,19 @@ impl State {
             }
         }
 
+        // An agent visible from two views is signalled once: every sink runs off
+        // the notifier's per-session token, which the first view's pass consumes.
         self.signal_attention(
             env,
             server,
+            view,
             &fetch.windows,
             &sessions,
             bell_on,
             notify_mode,
             notif_on,
         );
-        self.refresh_notifications(server, &fetch.windows, &sessions, notif_on);
+        self.refresh_notifications(server, view, &fetch.windows, &sessions, notif_on);
 
         // Clear attention for a session whose pane is now the focused one, so the
         // dot goes on the next poll (this poll's rows still show it, matching the
@@ -601,7 +722,7 @@ impl State {
                 e.attention_token = None;
             }
         }
-        self.clear_focused_notifications(server, &focused_panes);
+        self.clear_focused_notifications(server, view, &focused_panes);
 
         let pane_status = pane_status_map(&sessions);
         let tree = build_tree(
@@ -615,20 +736,17 @@ impl State {
         );
 
         let notifications = self
-            .servers
-            .get(server)
-            .map(|s| notification_nodes(&s.notifications))
+            .view(server, view)
+            .map(|v| notification_nodes(&v.notifications))
             .unwrap_or_default();
-        let current = self.servers.get(server).and_then(|s| s.selection.clone());
+        let current = self.view(server, view).and_then(|v| v.selection.clone());
         let selection = resolve_selection(current.as_ref(), &tree, &notifications);
-        if let Some(s) = self.servers.get_mut(server) {
-            s.selection = selection.clone();
-        }
+        self.view_mut(server, view).selection = selection.clone();
 
         let clients: Vec<ConnId> = self
             .clients
             .iter()
-            .filter(|(_, c)| &c.server == server)
+            .filter(|(_, c)| &c.server == server && c.session.as_ref() == Some(view))
             .map(|(id, _)| *id)
             .collect();
         for conn in clients {
@@ -665,6 +783,7 @@ impl State {
         &mut self,
         env: &E,
         server: &ServerKey,
+        view: &TmuxSessionId,
         windows: &[Window],
         sessions: &[Session],
         bell_on: bool,
@@ -726,19 +845,23 @@ impl State {
                 env.write_tty(&tty, "\x07");
             }
             if notif_on {
-                self.push_notification(server, s, text);
+                self.push_notification(server, view, s, text);
             }
         }
     }
 
-    /// Record an attention event in this server's notification area: newest
+    /// Record an attention event in this view's notification area: newest
     /// first, one entry per session (a session that fires again moves back to the
     /// top rather than filling the area with itself), and never more than
     /// [`NOTIFICATION_LIMIT`].
-    fn push_notification(&mut self, server: &ServerKey, session: &Session, body: String) {
-        let Some(state) = self.servers.get_mut(server) else {
-            return;
-        };
+    fn push_notification(
+        &mut self,
+        server: &ServerKey,
+        view: &TmuxSessionId,
+        session: &Session,
+        body: String,
+    ) {
+        let state = self.view_mut(server, view);
         state.notifications.retain(|n| n.session != session.id);
         state.notifications.insert(
             0,
@@ -753,22 +876,24 @@ impl State {
         state.notifications.truncate(NOTIFICATION_LIMIT);
     }
 
-    /// Bring this server's notification area back in line with the sessions just
+    /// Bring this view's notification area back in line with the sessions just
     /// placed: an entry whose session is displayed nowhere is dropped, and a
     /// surviving one re-reads the pane, message and color of the placement it
     /// names so opening it lands where the agent is now and it reads as the
     /// session reads now. Turning the area off empties it, so switching it back
     /// on does not resurrect stale entries.
+    ///
+    /// `sessions` are the placements of this view alone, so an agent that moves
+    /// to another session drops out of this area and is listed in that view's.
     fn refresh_notifications(
         &mut self,
         server: &ServerKey,
+        view: &TmuxSessionId,
         windows: &[Window],
         sessions: &[Session],
         on: bool,
     ) {
-        let Some(state) = self.servers.get_mut(server) else {
-            return;
-        };
+        let state = self.view_mut(server, view);
         if !on {
             state.notifications.clear();
             return;
@@ -791,10 +916,13 @@ impl State {
     /// the same pane: opening one focuses that pane, which answers every call
     /// coming from it just as focusing the pane by any other route would. An
     /// entry for another pane is a call you have not been to yet, so it stays.
-    fn dismiss_notification(&mut self, server: &ServerKey, session: &SessionKey) {
-        let Some(state) = self.servers.get_mut(server) else {
-            return;
-        };
+    fn dismiss_notification(
+        &mut self,
+        server: &ServerKey,
+        view: &TmuxSessionId,
+        session: &SessionKey,
+    ) {
+        let state = self.view_mut(server, view);
         let Some(pane) = state
             .notifications
             .iter()
@@ -810,10 +938,15 @@ impl State {
     /// looking at the agent, so its call has been answered. This is what clears
     /// the `●` too, so the two go together, and an event raised by a pane you are
     /// already sitting in never reaches the area at all.
-    fn clear_focused_notifications(&mut self, server: &ServerKey, focused: &IndexSet<PaneId>) {
-        if let Some(state) = self.servers.get_mut(server) {
-            state.notifications.retain(|n| !focused.contains(&n.pane));
-        }
+    fn clear_focused_notifications(
+        &mut self,
+        server: &ServerKey,
+        view: &TmuxSessionId,
+        focused: &IndexSet<PaneId>,
+    ) {
+        self.view_mut(server, view)
+            .notifications
+            .retain(|n| !focused.contains(&n.pane));
     }
 }
 
@@ -865,8 +998,14 @@ fn pane_status_map(sessions: &[Session]) -> IndexMap<PaneId, String> {
 pub struct RealTmux;
 
 impl TmuxEnv for RealTmux {
-    fn fetch_windows(&self, socket: &str) -> crate::tmux::FetchResult {
-        crate::tmux::fetch_windows(socket)
+    fn fetch_windows(&self, socket: &str, session: &TmuxSessionId) -> crate::tmux::FetchResult {
+        crate::tmux::fetch_windows(socket, session)
+    }
+    fn session_windows(&self, socket: &str) -> Vec<(TmuxSessionId, WindowId)> {
+        crate::tmux::session_windows(socket)
+    }
+    fn session_ranking(&self, socket: &str) -> Vec<TmuxSessionId> {
+        crate::tmux::session_ranking(socket)
     }
     fn window_real_panes(&self, socket: &str, window: &str) -> Vec<PaneId> {
         crate::tmux::window_real_panes(socket, window)
@@ -941,12 +1080,17 @@ mod tests {
             .collect()
     }
 
+    /// The session a single-session fixture is filed under.
+    const LONE: &str = "$0";
+
     /// A fake environment: canned window/option/ancestry reads, and recorded
     /// effects. `pane_tty` and `client_ttys` are synthesized from their inputs so
     /// a test can assert which tty a signal reached.
     #[derive(Default)]
     struct FakeTmux {
-        fetch: HashMap<String, FetchResult>,
+        fetch: HashMap<(String, TmuxSessionId), FetchResult>,
+        relation: HashMap<String, Vec<(TmuxSessionId, WindowId)>>,
+        ranking: HashMap<String, Vec<TmuxSessionId>>,
         options: HashMap<(String, String), String>,
         parents: HashMap<u32, u32>,
         writes: RefCell<Vec<(String, String)>>,
@@ -957,9 +1101,55 @@ mod tests {
     }
 
     impl FakeTmux {
-        fn with_windows(mut self, socket: &str, windows_out: &str, panes_out: &str) -> Self {
-            self.fetch
-                .insert(socket.to_string(), parse_windows(windows_out, panes_out));
+        /// A one-session server: the windows are filed under [`LONE`], which is
+        /// then the only view any sidebar on this socket can resolve to.
+        fn with_windows(self, socket: &str, windows_out: &str, panes_out: &str) -> Self {
+            self.with_session(socket, LONE, windows_out, panes_out)
+        }
+
+        /// Add one session's windows, and with them the relation and ranking rows
+        /// tmux would report: every window of `session` belongs to it, and
+        /// sessions rank in the order they are added unless `with_ranking`
+        /// overrides.
+        fn with_session(
+            mut self,
+            socket: &str,
+            session: &str,
+            windows_out: &str,
+            panes_out: &str,
+        ) -> Self {
+            let session = TmuxSessionId(session.to_string());
+            let fetch = parse_windows(windows_out, panes_out);
+            let relation = self.relation.entry(socket.to_string()).or_default();
+            for w in &fetch.windows {
+                relation.push((session.clone(), w.id.clone()));
+            }
+            let ranking = self.ranking.entry(socket.to_string()).or_default();
+            if !ranking.contains(&session) {
+                ranking.push(session.clone());
+            }
+            self.fetch.insert((socket.to_string(), session), fetch);
+            self
+        }
+
+        /// Link an existing window into a second session, as `link-window` does.
+        fn with_link(mut self, socket: &str, session: &str, window: &str) -> Self {
+            self.relation.entry(socket.to_string()).or_default().push((
+                TmuxSessionId(session.to_string()),
+                WindowId(window.to_string()),
+            ));
+            self
+        }
+
+        /// Replace the session ranking, most recently used first.
+        fn with_ranking(mut self, socket: &str, sessions: &[&str]) -> Self {
+            self.ranking.insert(
+                socket.to_string(),
+                sessions
+                    .iter()
+                    .map(|s| TmuxSessionId(s.to_string()))
+                    .collect(),
+            );
             self
         }
         fn with_option(mut self, socket: &str, name: &str, value: &str) -> Self {
@@ -979,13 +1169,23 @@ mod tests {
     }
 
     impl TmuxEnv for FakeTmux {
-        fn fetch_windows(&self, socket: &str) -> FetchResult {
-            self.fetch.get(socket).cloned().unwrap_or_default()
+        fn fetch_windows(&self, socket: &str, session: &TmuxSessionId) -> FetchResult {
+            self.fetch
+                .get(&(socket.to_string(), session.clone()))
+                .cloned()
+                .unwrap_or_default()
+        }
+        fn session_windows(&self, socket: &str) -> Vec<(TmuxSessionId, WindowId)> {
+            self.relation.get(socket).cloned().unwrap_or_default()
+        }
+        fn session_ranking(&self, socket: &str) -> Vec<TmuxSessionId> {
+            self.ranking.get(socket).cloned().unwrap_or_default()
         }
         fn window_real_panes(&self, socket: &str, window: &str) -> Vec<PaneId> {
             self.fetch
-                .get(socket)
-                .and_then(|f| f.windows.iter().find(|w| w.id.0 == window))
+                .iter()
+                .filter(|((s, _), _)| s == socket)
+                .find_map(|(_, f)| f.windows.iter().find(|w| w.id.0 == window))
                 .map(|w| w.panes.iter().map(|p| p.id.clone()).collect())
                 .unwrap_or_default()
         }
@@ -1075,10 +1275,15 @@ mod tests {
         state.poll_server(env, &ServerKey("/s".into()), &parents, &mut pushes);
     }
 
+    /// The state of one view of the sample server.
+    fn view_of(state: &State, session: &str) -> ViewState {
+        state.servers[&ServerKey("/s".into())].views[&TmuxSessionId(session.to_string())].clone()
+    }
+
     /// The session keys held in the sample server's notification area, in the
     /// order they are drawn.
     fn notified(state: &State) -> Vec<crate::model::SessionKey> {
-        state.servers[&ServerKey("/s".into())]
+        view_of(state, LONE)
             .notifications
             .iter()
             .map(|n| n.session.clone())
@@ -1335,7 +1540,7 @@ mod tests {
         );
         // The selection named a row that is gone, so it falls back into the tree.
         assert_eq!(
-            state.servers[&ServerKey("/s".into())].selection,
+            view_of(&state, LONE).selection,
             Some(RowKey::Window {
                 window: WindowId("@1".into())
             })
@@ -1479,6 +1684,186 @@ mod tests {
         assert!(state.dirty_registry);
     }
 
+    /// Two disjoint sessions on one server: `$0` holds `@1`, `$1` holds `@2`,
+    /// and neither shares a window.
+    fn two_session_env() -> FakeTmux {
+        FakeTmux::default()
+            .with_session(
+                "/s",
+                "$0",
+                "@1\t0\talpha\t1",
+                "@1\t%1\t0\t1\t\t\t\t2\t/home/x\ta",
+            )
+            .with_session(
+                "/s",
+                "$1",
+                "@2\t0\tbeta\t1",
+                "@2\t%2\t0\t1\t\t\t\t3\t/home/x\tb",
+            )
+    }
+
+    /// [`two_session_env`] with one sidebar client in each session: conn 0 in
+    /// `@1`, conn 1 in `@2`.
+    fn two_sessions() -> (FakeTmux, State) {
+        let env = two_session_env();
+        let mut state = State::new();
+        for (conn, window, pane) in [(0, "@1", "%8"), (1, "@2", "%9")] {
+            state.on_hello(
+                &env,
+                ConnId(conn),
+                ServerKey("/s".into()),
+                WindowId(window.into()),
+                PaneId(pane.into()),
+                30,
+            );
+        }
+        (env, state)
+    }
+
+    fn pushed(state: &State, conn: u64) -> RowModel {
+        state.clients[&ConnId(conn)].last_pushed.clone().unwrap()
+    }
+
+    #[test]
+    fn disjoint_sessions_each_draw_only_their_own_windows() {
+        let (_, mut state) = two_sessions();
+        assert_eq!(
+            drawn(&pushed(&state, 0).tree),
+            vec!["▌ 0: alpha", "▌ └─ 0: \u{f489}  a"]
+        );
+        assert_eq!(
+            drawn(&pushed(&state, 1).tree),
+            vec!["▌ 0: beta", "▌ └─ 0: \u{f489}  b"]
+        );
+
+        // Which session tmux considers current says nothing about what a sidebar
+        // in a window of the other one draws.
+        for order in [["$1", "$0"], ["$0", "$1"]] {
+            poll(&mut state, &two_session_env().with_ranking("/s", &order));
+            assert_eq!(
+                drawn(&pushed(&state, 0).tree),
+                vec!["▌ 0: alpha", "▌ └─ 0: \u{f489}  a"]
+            );
+            assert_eq!(
+                drawn(&pushed(&state, 1).tree),
+                vec!["▌ 0: beta", "▌ └─ 0: \u{f489}  b"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_linked_window_draws_the_most_recent_of_its_sessions() {
+        // @1 is linked into $1 as well, so its sidebar follows the user between
+        // the two sessions holding it.
+        let (_, mut state) = two_sessions();
+        let linked = |order: &[&str]| {
+            two_session_env()
+                .with_link("/s", "$1", "@1")
+                .with_ranking("/s", order)
+        };
+
+        poll(&mut state, &linked(&["$1", "$0"]));
+        assert_eq!(
+            state.clients[&ConnId(0)].session,
+            Some(TmuxSessionId("$1".into()))
+        );
+        assert_eq!(
+            drawn(&pushed(&state, 0).tree),
+            vec!["▌ 0: beta", "▌ └─ 0: \u{f489}  b"]
+        );
+
+        poll(&mut state, &linked(&["$0", "$1"]));
+        assert_eq!(
+            state.clients[&ConnId(0)].session,
+            Some(TmuxSessionId("$0".into()))
+        );
+        assert_eq!(
+            drawn(&pushed(&state, 0).tree),
+            vec!["▌ 0: alpha", "▌ └─ 0: \u{f489}  a"]
+        );
+    }
+
+    #[test]
+    fn width_and_selection_do_not_cross_between_views() {
+        let (env, mut state) = two_sessions();
+        let pushes = state.on_input(&env, ConnId(0), InputEvent::Resize { cols: 44 });
+        // The other view's sidebar is not dragged to a width the user chose for
+        // this one.
+        assert!(!pushes.iter().any(|(id, _)| *id == ConnId(1)));
+        assert_eq!(view_of(&state, "$0").width, Some(44));
+        assert_eq!(view_of(&state, "$1").width, None);
+
+        let key = RowKey::Pane {
+            pane: PaneId("%1".into()),
+        };
+        state.on_input(&env, ConnId(0), InputEvent::Select { key: key.clone() });
+        assert_eq!(view_of(&state, "$0").selection, Some(key));
+        // $1's selection stayed on its own tree rather than following a row id
+        // that names nothing in it.
+        assert_eq!(
+            view_of(&state, "$1").selection,
+            Some(RowKey::Window {
+                window: WindowId("@2".into())
+            })
+        );
+    }
+
+    #[test]
+    fn a_view_no_sidebar_draws_is_forgotten() {
+        let (env, mut state) = two_sessions();
+        state.on_input(&env, ConnId(1), InputEvent::Resize { cols: 44 });
+        assert!(state.servers[&ServerKey("/s".into())]
+            .views
+            .contains_key(&TmuxSessionId("$1".into())));
+
+        state.on_disconnect(ConnId(1));
+        poll(&mut state, &env);
+        assert!(!state.servers[&ServerKey("/s".into())]
+            .views
+            .contains_key(&TmuxSessionId("$1".into())));
+    }
+
+    #[test]
+    fn an_agent_visible_from_two_views_signals_once() {
+        // @1 is linked into $1, so the pane hosting the agent is placed in both
+        // views and each poll passes over it twice.
+        let env = FakeTmux::default()
+            .with_session(
+                "/s",
+                "$0",
+                "@1\t0\tmain\t1",
+                "@1\t%1\t0\t0\t\t\t\t2\t/home/x\tMySession",
+            )
+            .with_session(
+                "/s",
+                "$1",
+                "@1\t0\tmain\t1",
+                "@1\t%1\t0\t0\t\t\t\t2\t/home/x\tMySession",
+            )
+            .with_link("/s", "$1", "@1")
+            .with_parent(std::process::id(), 2)
+            .with_option("/s", "@wrangler-bell", "on");
+        let mut state = State::new();
+        state.on_hello(
+            &env,
+            ConnId(0),
+            ServerKey("/s".into()),
+            WindowId("@1".into()),
+            PaneId("%9".into()),
+            30,
+        );
+        register_occupying(&mut state, HookAction::NeedsAttention, 1);
+        poll(&mut state, &env);
+
+        let bells = env
+            .writes
+            .borrow()
+            .iter()
+            .filter(|(_, data)| data == "\x07")
+            .count();
+        assert_eq!(bells, 1, "one event is one bell, however many views see it");
+    }
+
     #[test]
     fn resize_relays_shared_width_to_other_clients_only() {
         let env = env_for(true);
@@ -1489,7 +1874,7 @@ mod tests {
         let pushes = state.on_input(&env, ConnId(0), InputEvent::Resize { cols: 44 });
         // Only conn 1 is told to adopt the width; the resizing client is not.
         assert_eq!(pushes, vec![(ConnId(1), ServerMsg::Width { cols: 44 })]);
-        assert_eq!(state.servers[&ServerKey("/s".into())].width, Some(44));
+        assert_eq!(view_of(&state, LONE).width, Some(44));
     }
 
     #[test]
@@ -1524,7 +1909,7 @@ mod tests {
         let pushes = state.on_input(&env, ConnId(1), InputEvent::Resize { cols: 200 });
         assert_eq!(pushes, vec![(ConnId(1), ServerMsg::Exit)]);
         // No width was adopted, so the healthy client is never dragged wide.
-        assert_eq!(state.servers[&ServerKey("/s".into())].width, None);
+        assert_eq!(view_of(&state, LONE).width, None);
         assert!(!pushes
             .iter()
             .any(|(_, m)| matches!(m, ServerMsg::Width { .. })));
